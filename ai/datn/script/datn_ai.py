@@ -10,6 +10,8 @@ from collections import defaultdict
 import argparse
 from torchvision import transforms, models
 from PIL import Image
+from pathlib import Path
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 from ai.datn.objects import EmotionClassifier
 
@@ -19,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ByteTrack'))
 from yolox.tracker.byte_tracker import BYTETracker
 from yolox.tracking_utils.timer import Timer
 
-
+# ====== HỖ TRỢ CHO BYTETRACKER ======
 class Args:
     """Class để lưu trữ các tham số cho ByteTracker"""
 
@@ -77,6 +79,37 @@ def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, t
     cv2.putText(frame, f"Faces: {len(online_targets)}", (10, 70),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
+    # BATCH PROCESSING - Thu thập tất cả face crops trước
+    if predict_emotion and len(online_targets) > 0:
+        face_crops = []
+        valid_tracks = []
+        
+        for track in online_targets:
+            tlwh = track.tlwh
+            x1, y1, w, h = tlwh
+            x2 = x1 + w
+            y2 = y1 + h
+            
+            x1 = max(0, int(x1))
+            y1 = max(0, int(y1))
+            x2 = min(frame.shape[1], int(x2))
+            y2 = min(frame.shape[0], int(y2))
+            
+            face_crop = frame[y1:y2, x1:x2]
+            
+            if face_crop.size > 0 and w > 20 and h > 20:
+                face_crops.append(face_crop)
+                valid_tracks.append(track.track_id)
+        
+        # Predict tất cả faces cùng lúc (BATCH)
+        if len(face_crops) > 0:
+            emotion_results = emotion_classifier.predict_batch(face_crops)
+            
+            # Lưu kết quả vào cache
+            for track_id, (emotion, conf) in zip(valid_tracks, emotion_results):
+                track_emotions[track_id] = (emotion, conf)
+
+    # Vẽ visualization cho từng track
     for track in online_targets:
         tlwh = track.tlwh
         track_id = track.track_id
@@ -91,18 +124,11 @@ def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, t
         x2 = min(frame.shape[1], int(x2))
         y2 = min(frame.shape[0], int(y2))
 
-        face_crop = frame[y1:y2, x1:x2]
-
-        # ✅ CHỈ PREDICT KHI FLAG = TRUE
-        if predict_emotion and face_crop.size > 0 and w > 20 and h > 20:
-            emotion, emotion_conf = emotion_classifier.predict(face_crop)
-            track_emotions[track_id] = (emotion, emotion_conf)
+        # Lấy emotion từ cache
+        if track_id in track_emotions:
+            emotion, emotion_conf = track_emotions[track_id]
         else:
-            # Dùng emotion cached
-            if track_id in track_emotions:
-                emotion, emotion_conf = track_emotions[track_id]
-            else:
-                emotion, emotion_conf = "unknown", 0.0
+            emotion, emotion_conf = "unknown", 0.0
 
         color = get_emotion_color(emotion)
 
@@ -139,7 +165,7 @@ def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, t
 
     return frame
 
-
+# ====== MAIN TRACKER CLASS ======
 class FaceEmotionTracker:
     """Class để tracking và nhận diện cảm xúc từ frame"""
 
@@ -156,18 +182,16 @@ class FaceEmotionTracker:
         print(f"Loading YOLO model: {model_path}")
         self.model = YOLO(model_path)
         
-        # ✅ TỐI ƯU: Set GPU nếu có
         if torch.cuda.is_available():
             self.model.to('cuda')
             print("✅ Using GPU for YOLO")
         
-        # ✅ TỐI ƯU: Giảm kích thước input YOLO
-        self.input_size = 416  # Thay vì 640 default
+        self.input_size = 960
         
         print(f"Loading Emotion Classifier: {emotion_weights_path}")
         self.emotion_classifier = EmotionClassifier(emotion_weights_path)
         
-        # ✅ TỐI ƯU: Cache emotion để không predict mỗi frame
+ 
         self.emotion_cache_frames = 3  # Chỉ predict emotion mỗi 3 frames
         self.frame_count = 0
 
@@ -185,16 +209,26 @@ class FaceEmotionTracker:
 
         self.prev_time = time.time()
         self.fps = 0
+        self.fps_history = []  # Lưu lịch sử FPS
+        self.fps_avg_window = 30  # Trung bình 30 frames
         
-        print("✅ FaceEmotionTracker initialized!")
+        print("Đã khởi tạo FaceEmotionTracker!")
 
     def process_frame(self, frame):
         """Xử lý một frame và trả về kết quả"""
-        # Tính FPS
         curr_time = time.time()
-        self.fps = 1 / (curr_time - self.prev_time + 1e-6)
-        self.prev_time = curr_time
+        delta_time = curr_time - self.prev_time
         
+        if delta_time > 0:
+            instant_fps = 1.0 / delta_time
+            self.fps_history.append(instant_fps)
+            
+            if len(self.fps_history) > self.fps_avg_window:
+                self.fps_history.pop(0)
+            
+            self.fps = sum(self.fps_history) / len(self.fps_history)
+        
+        self.prev_time = curr_time
         self.frame_count += 1
 
         height, width = frame.shape[:2]
@@ -214,10 +248,10 @@ class FaceEmotionTracker:
         else:
             online_targets = []
 
-        # ✅ CACHE EMOTION - chỉ predict mỗi N frames
+        # CACHE EMOTION - chỉ predict mỗi N frames
         should_predict_emotion = (self.frame_count % self.emotion_cache_frames == 0)
         
-        # Visualize với emotion
+        # hiển thị với emotion
         visualize_frame = visualize_tracking_with_emotion(
             frame, online_targets, self.emotion_classifier,
             self.track_emotions, int(self.fps),
@@ -249,7 +283,8 @@ class FaceEmotionTracker:
             'fps': float(self.fps),
             'tracks': tracks_info
         }
-
+        
+# ====== RESET FUNCTION ======
     def reset(self):
         """Reset tracker state"""
         self.tracker = BYTETracker(Args(), frame_rate=30)
@@ -258,5 +293,156 @@ class FaceEmotionTracker:
         print("Tracker reset!")
 
 
+# ====== VIDEO PROCESSING FUNCTION ======
+    def process_video(
+        input_video_path,
+        output_video_path=None,
+        yolo_model_path=r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\model_weights\yolo_models\yolov11s_custom.pt",
+        emotion_model_path=r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\model_weights\mobilenet_models\mobilenetv3_best_weights_only.pth",
+        show_preview=False,
+        skip_frames=1
+    ):
+        """
+        Xử lý video với face tracking và emotion detection
+        
+        Args:
+            input_video_path: Đường dẫn đến video input
+            output_video_path: Đường dẫn lưu video output (mặc định: input_processed.mp4)
+            yolo_model_path: Đường dẫn model YOLO (optional)
+            emotion_model_path: Đường dẫn model emotion (optional)
+            show_preview: Hiển thị preview trong khi xử lý
+            skip_frames: Bỏ qua N frames để tăng tốc (1 = xử lý tất cả)
+        
+        Returns:
+            Dict chứa thông tin xử lý
+        """
+        
+        # Kiểm tra file input
+        if not os.path.exists(input_video_path):
+            raise FileNotFoundError(f"Video không tồn tại: {input_video_path}")
+        
+        # Tạo output path nếu chưa có
+        if output_video_path is None:
+            input_path = Path(input_video_path)
+            output_video_path = str(input_path.parent / f"{input_path.stem}_processed{input_path.suffix}")
+        
+        # Tạo thư mục output nếu chưa có
+        os.makedirs(os.path.dirname(output_video_path) or ".", exist_ok=True)
+        
+        print(f"Input video: {input_video_path}")
+        print(f"Output video: {output_video_path}")
+        
+        # Mở video
+        cap = cv2.VideoCapture(input_video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Không thể mở video: {input_video_path}")
+        
+        # Lấy thông tin video
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        print(f"Video info: {width}x{height} @ {fps}fps, {total_frames} frames")
+        print(f"Thời lượng: {total_frames/fps:.2f} giây")
+        
+        # Khởi tạo VideoWriter
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # hoặc 'XVID', 'H264'
+        out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+        
+        if not out.isOpened():
+            raise ValueError(f"Không thể tạo video output: {output_video_path}")
+        
+        # Khởi tạo tracker
+        print(f"Đang khởi tạo FaceEmotionTracker...")
+        tracker_kwargs = {}
+        if yolo_model_path:
+            tracker_kwargs['model_path'] = yolo_model_path
+        if emotion_model_path:
+            tracker_kwargs['emotion_weights_path'] = emotion_model_path
+        
+        tracker = FaceEmotionTracker(**tracker_kwargs)
+        
+        # Xử lý từng frame
+        print(f"Bắt đầu xử lý video...")
+        frame_idx = 0
+        processed_frames = 0
+        
+        try:
+            try:
+                from tqdm import tqdm
+                use_tqdm = True
+                pbar = tqdm(total=total_frames, desc="Processing", unit="frames")
+            except ImportError:
+                use_tqdm = False
+            while True:
+                ret, frame = cap.read()
+                
+                if not ret:
+                    break
+                
+                frame_idx += 1
+                
+                # Skip frames nếu cần
+                if skip_frames > 1 and frame_idx % skip_frames != 0:
+                    out.write(frame)
+                    if use_tqdm:
+                        pbar.update(1)
+                    elif frame_idx % 100 == 0:
+                        print(f"  Processed: {frame_idx}/{total_frames} frames ({frame_idx/total_frames*100:.1f}%)")
+                    continue
+                
+                # Xử lý frame
+                result = tracker.process_frame(frame)
+                processed_frame = result['frame']
+                
+                # Ghi frame đã xử lý
+                out.write(processed_frame)
+                processed_frames += 1
+                
+                # Hiển thị preview nếu cần
+                if show_preview:
+                    cv2.imshow('Processing Video', processed_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        print("\nNgười dùng dừng xử lý!")
+                        break
+                
+                # Cập nhật progress
+                if use_tqdm:
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'FPS': f"{result['fps']:.1f}",
+                        'Faces': len(result['tracks'])
+                    })
+                elif frame_idx % 100 == 0:
+                    print(f"  Processed: {frame_idx}/{total_frames} frames ({frame_idx/total_frames*100:.1f}%) - FPS: {result['fps']:.1f}, Faces: {len(result['tracks'])}")
+        
+        except KeyboardInterrupt:
+            print("\n Đã dừng bởi người dùng (Ctrl+C)")
+        
+        finally:
+            # Cleanup
+            if use_tqdm:
+                pbar.close()
+            cap.release()
+            out.release()
+            if show_preview:
+                cv2.destroyAllWindows()
+        
+        # Tổng kết
+        print(f"\nHoàn thành!")
+        print(f"Đã xử lý: {processed_frames}/{total_frames} frames")
+        print(f"Video đã lưu tại: {output_video_path}")
+        
+        return {
+            'input_path': input_video_path,
+            'output_path': output_video_path,
+            'total_frames': total_frames,
+            'processed_frames': processed_frames,
+            'fps': fps,
+            'resolution': (width, height)
+        }
+
+
 if __name__ == "__main__":
-    pass
+   pass

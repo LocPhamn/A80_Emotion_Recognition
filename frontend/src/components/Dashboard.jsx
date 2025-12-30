@@ -13,12 +13,12 @@ function Dashboard() {
   })
 
   const menuItems = [
-    { id: 'home', icon: '🏠', label: 'Dashboard', active: true },
-    { id: 'webcam', icon: '📹', label: 'Realtime Detection' },
-    { id: 'upload', icon: '📁', label: 'Upload Video' },
-    { id: 'statistics', icon: '📊', label: 'Statistics' },
-    { id: 'history', icon: '📋', label: 'History' },
-    { id: 'settings', icon: '⚙️', label: 'Settings' }
+    { id: 'home', icon: '🏠', label: 'Trang Chủ', active: true },
+    { id: 'webcam', icon: '📹', label: 'Nhận dạng Webcam' },
+    { id: 'upload', icon: '📁', label: 'Tải Video lên' },
+    { id: 'statistics', icon: '📊', label: 'Thống kê' },
+    { id: 'history', icon: '📋', label: 'Lịch sử' },
+    { id: 'settings', icon: '⚙️', label: 'Cài đặt' }
   ]
 
   const renderContent = () => {
@@ -27,8 +27,8 @@ function Dashboard() {
         return (
           <div className="home-content">
             <div className="welcome-section">
-              <h1>🎯 AI Detection Dashboard</h1>
-              <p>Computer Vision Object Detection System</p>
+              <h1>Trang chủ nhận dạng</h1>
+              <p>Hệ thống nhận diện cảm xúc triễn làm A80</p>
             </div>
             <Statistics stats={detectionStats} />
           </div>
@@ -36,24 +36,24 @@ function Dashboard() {
       case 'webcam':
         return (
           <div className="content-section">
-            <h1>📹 Realtime Webcam Detection</h1>
-            <p className="subtitle">Detect objects in real-time using your webcam</p>
+            <h1>📹 Nhận dạng Webcam thời gian thực</h1>
+            <p className="subtitle">Nhận dạng đối tượng thời gian thực sử dụng webcam của bạn</p>
             <WebcamDetection onStats={setDetectionStats} />
           </div>
         )
       case 'upload':
         return (
           <div className="content-section">
-            <h1>📁 Upload Video</h1>
-            <p className="subtitle">Upload and analyze video files</p>
+            <h1>📁 Tải Video lên</h1>
+            <p className="subtitle">Tải lên và phân tích các tệp video</p>
             <VideoUpload onStats={setDetectionStats} />
           </div>
         )
       case 'statistics':
         return (
           <div className="content-section">
-            <h1>📊 Statistics Overview</h1>
-            <p className="subtitle">View detailed analytics and metrics</p>
+            <h1>📊 Tổng quan Thống kê</h1>
+            <p className="subtitle">Xem phân tích chi tiết và các chỉ số</p>
             <Statistics stats={detectionStats} />
             <div className="stats-details">
               <div className="detail-card">
@@ -77,14 +77,14 @@ function Dashboard() {
       case 'history':
         return (
           <div className="content-section">
-            <h1>📋 Detection History</h1>
-            <p className="subtitle">View past detection results</p>
+            <h1>📋 Lịch sử Nhận dạng</h1>
+            <p className="subtitle">Xem kết quả nhận dạng trước đây</p>
             <div className="history-list">
               <div className="history-item">
                 <span className="history-icon">🎥</span>
                 <div className="history-info">
-                  <strong>Video Analysis - traffic.mp4</strong>
-                  <p>Detected 245 objects | Dec 20, 2025 14:30</p>
+                  <strong>Phân tích Video - traffic.mp4</strong>
+                  <p>Đã phát hiện 245 đối tượng | 20 Tháng 12, 2025 14:30</p>
                 </div>
               </div>
               <div className="history-item">
@@ -100,8 +100,8 @@ function Dashboard() {
       case 'settings':
         return (
           <div className="content-section">
-            <h1>⚙️ Settings</h1>
-            <p className="subtitle">Configure detection parameters</p>
+            <h1>⚙️ Cài đặt</h1>
+            <p className="subtitle">Cấu hình các tham số nhận dạng</p>
             <div className="settings-group">
               <h3>Detection Settings</h3>
               <div className="setting-item">
@@ -153,7 +153,7 @@ function Dashboard() {
             <span className="user-avatar">👤</span>
             <div>
               <strong>John Doe</strong>
-              <p>Admin</p>
+              <p>Quản trị viên</p>
             </div>
           </div>
         </div>

@@ -5,7 +5,7 @@ import cv2
 from deepface import DeepFace
 from tqdm import tqdm
 
-from script.processing import resize_face
+from processing import resize_face
 
 
 def detect_and_crop_faces_deepface(root, face_dir, confidence_threshold=0.8):
@@ -180,4 +180,5 @@ if __name__ == '__main__':
         print("tổng ảnh: ", len(a80_images))
         print("="*50)
 
-
+if __name__ == '__main__':
+    pass

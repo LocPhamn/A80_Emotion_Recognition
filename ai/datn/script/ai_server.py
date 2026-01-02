@@ -1,5 +1,6 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from starlette.websockets import WebSocketDisconnect
 import cv2
 import numpy as np
@@ -8,6 +9,8 @@ import os
 import uuid
 from pathlib import Path
 from fastapi import UploadFile, File, BackgroundTasks
+from typing import Optional
+import traceback
 from datn_ai import FaceEmotionTracker
 
 app = FastAPI()
@@ -21,6 +24,15 @@ app.add_middleware(
 
 # Khởi tạo model
 tracker = FaceEmotionTracker()
+
+# Setup video directories
+TEMP_DIR = Path("./temp_videos")
+OUTPUT_DIR = Path("./output_videos")
+TEMP_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Lưu trạng thái các job đang xử lý
+video_jobs = {}
 
 @app.websocket("/ws/process")
 async def ai_websocket(ws: WebSocket):
@@ -89,6 +101,172 @@ async def ai_websocket(ws: WebSocket):
 async def health_check():
     """API health kiểm tra endpoint."""
     return {"status": "ok", "service": "AI Emotion Detection"}
+
+# ====== VIDEO PROCESSING ENDPOINTS ======
+
+def process_video_task(job_id: str, input_path: str, output_path: str, skip_frames: int):
+    """Background task xử lý video"""
+    try:
+        # Cập nhật status
+        video_jobs[job_id]["status"] = "processing"
+        video_jobs[job_id]["progress"] = 0
+        
+        # Mở video để lấy thông tin
+        cap = cv2.VideoCapture(input_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        
+        # Khởi tạo tracker mới cho job này
+        job_tracker = FaceEmotionTracker()
+        
+        # Mở video lại
+        cap = cv2.VideoCapture(input_path)
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Khởi tạo VideoWriter
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        frame_idx = 0
+        processed_frames = 0
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_idx += 1
+            
+            # Skip frames nếu cần
+            if skip_frames > 1 and frame_idx % skip_frames != 0:
+                out.write(frame)
+            else:
+                # Xử lý frame
+                result = job_tracker.process_frame(frame)
+                out.write(result['frame'])
+                processed_frames += 1
+            
+            # Cập nhật progress
+            progress = int((frame_idx / total_frames) * 100)
+            video_jobs[job_id]["progress"] = progress
+        
+        cap.release()
+        out.release()
+        
+        # Cập nhật kết quả
+        video_jobs[job_id].update({
+            "status": "completed",
+            "progress": 100,
+            "result": {
+                "total_frames": total_frames,
+                "processed_frames": processed_frames,
+                "fps": fps,
+                "resolution": [width, height]
+            }
+        })
+        
+        print(f"✅ Job {job_id} hoàn thành: {processed_frames}/{total_frames} frames")
+        
+    except Exception as e:
+        video_jobs[job_id].update({
+            "status": "failed",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        print(f"❌ Job {job_id} thất bại: {e}")
+
+@app.post("/api/video/upload-and-process")
+async def upload_and_process_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    skip_frames: int = 1
+):
+    """Upload video và xử lý với face tracking + emotion detection"""
+    
+    # Validate file type
+    if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ video format: mp4, avi, mov, mkv")
+    
+    # Tạo job ID
+    job_id = str(uuid.uuid4())
+    
+    # Tạo đường dẫn file
+    safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._- ")
+    input_path = TEMP_DIR / f"{job_id}_{safe_filename}"
+    output_path = OUTPUT_DIR / f"{job_id}_processed.mp4"
+    
+    # Lưu file upload
+    try:
+        with open(input_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Không thể lưu file: {str(e)}")
+    
+    # Tạo job info
+    video_jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "filename": file.filename,
+        "input_path": str(input_path),
+        "output_path": str(output_path),
+        "error": None
+    }
+    
+    # Chạy background task
+    background_tasks.add_task(
+        process_video_task,
+        job_id,
+        str(input_path),
+        str(output_path),
+        skip_frames
+    )
+    
+    print(f"📤 Job {job_id} đã được tạo cho file: {file.filename}")
+    
+    return {
+        "job_id": job_id,
+        "message": "Video đang được xử lý",
+        "filename": file.filename,
+        "status_url": f"/api/video/status/{job_id}"
+    }
+
+@app.get("/api/video/status/{job_id}")
+async def get_video_status(job_id: str):
+    """Kiểm tra trạng thái xử lý video"""
+    
+    if job_id not in video_jobs:
+        raise HTTPException(status_code=404, detail="Job không tồn tại")
+    
+    return video_jobs[job_id]
+
+@app.get("/api/video/download/{job_id}")
+async def download_processed_video(job_id: str):
+    """Download video đã xử lý"""
+    
+    if job_id not in video_jobs:
+        raise HTTPException(status_code=404, detail="Job không tồn tại")
+    
+    job = video_jobs[job_id]
+    
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Video chưa xử lý xong. Status: {job['status']}, Progress: {job.get('progress', 0)}%"
+        )
+    
+    output_path = job["output_path"]
+    
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=404, detail="File output không tồn tại")
+    
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=f"processed_{job['filename']}"
+    )
 
 if __name__ == "__main__":
     import uvicorn

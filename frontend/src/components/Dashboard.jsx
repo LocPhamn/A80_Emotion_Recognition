@@ -2,6 +2,7 @@ import { useState } from 'react'
 import VideoUpload from './VideoUpload.jsx'
 import WebcamDetection from './WebcamDetection.jsx'
 import Statistics from './Statistics.jsx'
+import VideoManagement from './VideoManagement.jsx'
 import './Dashboard.css'
 
 function Dashboard() {
@@ -16,6 +17,7 @@ function Dashboard() {
     { id: 'home', icon: '🏠', label: 'Trang Chủ', active: true },
     { id: 'webcam', icon: '📹', label: 'Nhận dạng Webcam' },
     { id: 'upload', icon: '📁', label: 'Tải Video lên' },
+    { id: 'videos', icon: '🎬', label: 'Quản lý Video' },
     { id: 'statistics', icon: '📊', label: 'Thống kê' },
     { id: 'history', icon: '📋', label: 'Lịch sử' },
     { id: 'settings', icon: '⚙️', label: 'Cài đặt' }
@@ -47,6 +49,12 @@ function Dashboard() {
             <h1>📁 Tải Video lên</h1>
             <p className="subtitle">Tải lên và phân tích các tệp video</p>
             <VideoUpload onStats={setDetectionStats} />
+          </div>
+        )
+      case 'videos':
+        return (
+          <div className="content-section">
+            <VideoManagement />
           </div>
         )
       case 'statistics':

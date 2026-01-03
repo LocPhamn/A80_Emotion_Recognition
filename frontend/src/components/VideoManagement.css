@@ -72,8 +72,14 @@
   border-radius: 6px;
   font-size: 0.95rem;
   background: white;
+  color: #000000;
   cursor: pointer;
   transition: border-color 0.3s;
+}
+
+.vm-filter-group select option {
+  color: #000000;
+  background: white;
 }
 
 .vm-filter-group select:focus,

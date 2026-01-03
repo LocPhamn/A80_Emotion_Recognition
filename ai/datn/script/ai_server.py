@@ -12,6 +12,7 @@ from fastapi import UploadFile, File, BackgroundTasks
 from typing import Optional
 import traceback
 from datn_ai import FaceEmotionTracker
+import datn_ai  # Import module để dùng process_video function
 
 app = FastAPI()
 
@@ -111,63 +112,33 @@ def process_video_task(job_id: str, input_path: str, output_path: str, skip_fram
         video_jobs[job_id]["status"] = "processing"
         video_jobs[job_id]["progress"] = 0
         
-        # Mở video để lấy thông tin
-        cap = cv2.VideoCapture(input_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
+        print(f"🎬 Bắt đầu xử lý video job {job_id}")
         
-        # Khởi tạo tracker mới cho job này
-        job_tracker = FaceEmotionTracker()
+        # Gọi hàm process_video từ datn_ai với đầy đủ tính năng
+        result = datn_ai.FaceEmotionTracker.process_video(
+            input_video_path=input_path,
+            output_video_path=output_path,
+            skip_frames=skip_frames,
+            show_preview=False
+        )
         
-        # Mở video lại
-        cap = cv2.VideoCapture(input_path)
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Khởi tạo VideoWriter
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        frame_idx = 0
-        processed_frames = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            frame_idx += 1
-            
-            # Skip frames nếu cần
-            if skip_frames > 1 and frame_idx % skip_frames != 0:
-                out.write(frame)
-            else:
-                # Xử lý frame
-                result = job_tracker.process_frame(frame)
-                out.write(result['frame'])
-                processed_frames += 1
-            
-            # Cập nhật progress
-            progress = int((frame_idx / total_frames) * 100)
-            video_jobs[job_id]["progress"] = progress
-        
-        cap.release()
-        out.release()
-        
-        # Cập nhật kết quả
+        # Cập nhật kết quả với thông tin đầy đủ
         video_jobs[job_id].update({
             "status": "completed",
             "progress": 100,
             "result": {
-                "total_frames": total_frames,
-                "processed_frames": processed_frames,
-                "fps": fps,
-                "resolution": [width, height]
+                "total_visitor": result['total_visitor'],
+                "emotion_ratios": result['emotion_ratios'],
+                "total_frames": result['total_frames'],
+                "processed_frames": result['processed_frames'],
+                "fps": result['fps'],
+                "resolution": result['resolution']
             }
         })
         
-        print(f"✅ Job {job_id} hoàn thành: {processed_frames}/{total_frames} frames")
+        print(f"✅ Job {job_id} hoàn thành!")
+        print(f"   - Total visitors: {result['total_visitor']}")
+        print(f"   - Processed frames: {result['processed_frames']}/{result['total_frames']}")
         
     except Exception as e:
         video_jobs[job_id].update({
@@ -176,6 +147,7 @@ def process_video_task(job_id: str, input_path: str, output_path: str, skip_fram
             "traceback": traceback.format_exc()
         })
         print(f"❌ Job {job_id} thất bại: {e}")
+        traceback.print_exc()
 
 @app.post("/api/video/upload-and-process")
 async def upload_and_process_video(

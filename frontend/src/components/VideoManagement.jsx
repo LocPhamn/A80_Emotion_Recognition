@@ -153,10 +153,8 @@ function VideoManagement() {
             <label>Trạng thái:</label>
             <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">Tất cả</option>
-              <option value="pending">Pending</option>
-              <option value="processing">Processing</option>
-              <option value="completed">Completed</option>
-              <option value="failed">Failed</option>
+              <option value="process">process</option>
+              <option value="unprocess">unprocess</option>
             </select>
           </div>
 
@@ -250,17 +248,11 @@ function VideoManagement() {
                         ⚙️
                       </button>
                       <div className="vm-dropdown-content">
-                        <button onClick={() => handleUpdateStatus(video, 'pending')}>
-                          Pending
+                        <button onClick={() => handleUpdateStatus(video, 'process')}>
+                          process
                         </button>
-                        <button onClick={() => handleUpdateStatus(video, 'processing')}>
-                          Processing
-                        </button>
-                        <button onClick={() => handleUpdateStatus(video, 'completed')}>
-                          Completed
-                        </button>
-                        <button onClick={() => handleUpdateStatus(video, 'failed')}>
-                          Failed
+                        <button onClick={() => handleUpdateStatus(video, 'unprocess')}>
+                          unprocess
                         </button>
                       </div>
                     </div>

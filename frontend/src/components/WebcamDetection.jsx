@@ -8,9 +8,12 @@ function WebcamDetection({ onStats }) {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [fps, setFps] = useState(0)
+  const [realFps, setRealFps] = useState(0) // ✅ FPS thực tế từ frontend
   const [tracks, setTracks] = useState([])
   const streamRef = useRef(null)
   const intervalRef = useRef(null)
+  const lastFrameTimeRef = useRef(performance.now())
+  const fpsHistoryRef = useRef([])
 
   const startWebcam = async () => {
     try {
@@ -34,7 +37,7 @@ function WebcamDetection({ onStats }) {
         videoRef.current.onloadedmetadata = () => {
           videoRef.current.play()
             .then(() => {
-              console.log('✅ Video playing!')
+              console.log('Video playing!')
               setIsActive(true)
               setLoading(false)
               
@@ -42,7 +45,7 @@ function WebcamDetection({ onStats }) {
               connectWebSocket()
             })
             .catch(err => {
-              console.error('❌ Play error:', err)
+              console.error('Play error:', err)
               setError('Failed to play: ' + err.message)
               setLoading(false)
             })
@@ -50,7 +53,7 @@ function WebcamDetection({ onStats }) {
       }
       
     } catch (err) {
-      console.error('❌ Webcam error:', err)
+      console.error('Webcam error:', err)
       setLoading(false)
       if (err.name === 'NotAllowedError') {
         setError('Camera permission denied. Please allow camera access.')
@@ -64,7 +67,7 @@ function WebcamDetection({ onStats }) {
   }
 
   const connectWebSocket = () => {
-    const ws = new WebSocket('ws://localhost:8000/ws')
+    const ws = new WebSocket('ws://localhost:8001/ws/process')
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -74,6 +77,23 @@ function WebcamDetection({ onStats }) {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data)
+      
+      // ✅ TÍNH FPS THỰC TẾ Ở FRONTEND
+      const now = performance.now()
+      const deltaTime = now - lastFrameTimeRef.current
+      lastFrameTimeRef.current = now
+      
+      if (deltaTime > 0) {
+        const instantFps = 1000 / deltaTime
+        fpsHistoryRef.current.push(instantFps)
+        
+        if (fpsHistoryRef.current.length > 30) {
+          fpsHistoryRef.current.shift()
+        }
+        
+        const avgFps = fpsHistoryRef.current.reduce((a, b) => a + b, 0) / fpsHistoryRef.current.length
+        setRealFps(avgFps)
+      }
       
       // Hiển thị frame đã xử lý
       if (data.frame && canvasRef.current) {
@@ -116,15 +136,23 @@ function WebcamDetection({ onStats }) {
   }
 
   const startSendingFrames = () => {
-  let isProcessing = false; // Thêm flag để tránh gửi liên tục
+  let isProcessing = false;
+  let lastSendTime = performance.now();
+  const minFrameInterval = 50; // Tối đa 20 FPS (50ms/frame)
   
   const sendFrame = () => {
-    if (isProcessing || !videoRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
+    const now = performance.now();
+    const timeSinceLastSend = now - lastSendTime;
+    
+    // ✅ THROTTLE: Đảm bảo không gửi quá nhanh
+    if (isProcessing || timeSinceLastSend < minFrameInterval || 
+        !videoRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
       requestAnimationFrame(sendFrame);
       return;
     }
     
     isProcessing = true;
+    lastSendTime = now;
     
     const canvas = document.createElement('canvas');
     const scale = 0.5; // 640x360 thay vì 1280x720
@@ -172,7 +200,9 @@ function WebcamDetection({ onStats }) {
     setLoading(false)
     setError(null)
     setFps(0)
+    setRealFps(0)
     setTracks([])
+    fpsHistoryRef.current = []
   }
 
   useEffect(() => {
@@ -222,12 +252,12 @@ function WebcamDetection({ onStats }) {
               {loading ? (
                 <>
                   <span className="placeholder-icon">⏳</span>
-                  <p>Loading webcam...</p>
+                  <p>Đang tải webcam...</p>
                 </>
               ) : (
                 <>
                   <span className="placeholder-icon">📹</span>
-                  <p>Click start to begin detection</p>
+                  <p>Click bắt đầu webcam</p>
                   {error && (
                     <p style={{ 
                       color: '#ff4757', 
@@ -238,7 +268,7 @@ function WebcamDetection({ onStats }) {
                       fontSize: '0.9rem',
                       maxWidth: '400px'
                     }}>
-                      ⚠️ {error}
+                       {error}
                     </p>
                   )}
                 </>
@@ -255,11 +285,11 @@ function WebcamDetection({ onStats }) {
             className="btn-success"
             disabled={loading}
           >
-            {loading ? '⏳ Loading...' : '▶️ Start Webcam'}
+            {loading ? '⏳ Đang tải...' : '▶️ Bắt đầu Webcam'}
           </button>
         ) : (
           <button onClick={stopWebcam} className="btn-danger">
-            ⏹️ Stop Webcam
+            ⏹️ Ngừng Webcam
           </button>
         )}
       </div>
@@ -273,12 +303,29 @@ function WebcamDetection({ onStats }) {
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-around' }}>
             <span style={{ color: '#4caf50', fontWeight: 'bold' }}>
-              🟢 FPS: {fps.toFixed(1)}
+              🟢 Backend FPS: {fps.toFixed(1)}
+            </span>
+            <span style={{ color: realFps < 10 ? '#ff4757' : '#2196f3', fontWeight: 'bold' }}>
+              📊 Real FPS: {realFps.toFixed(1)}
             </span>
             <span style={{ color: '#2196f3', fontWeight: 'bold' }}>
               👥 Faces: {tracks.length}
             </span>
           </div>
+          
+          {realFps < 10 && (
+            <div style={{ 
+              marginTop: '10px', 
+              padding: '8px',
+              background: 'rgba(255,71,87,0.1)',
+              borderRadius: '5px',
+              color: '#ff4757',
+              fontSize: '0.85rem',
+              textAlign: 'center'
+            }}>
+              FPS thực tế thấp hơn 10. Vui lòng kiểm tra kết nối mạng hoặc giảm độ phân giải webcam để cải thiện hiệu suất.
+            </div>
+          )}
           
           {tracks.length > 0 && (
             <div style={{ marginTop: '10px', fontSize: '0.9rem' }}>

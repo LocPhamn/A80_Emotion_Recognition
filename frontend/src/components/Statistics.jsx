@@ -5,7 +5,7 @@ function Statistics({ stats }) {
         <div className="stat-icon">📊</div>
         <div className="stat-content">
           <h3>{stats.totalFrames}</h3>
-          <p>Total Frames</p>
+          <p>Tổng Frames</p>
         </div>
       </div>
 
@@ -13,7 +13,7 @@ function Statistics({ stats }) {
         <div className="stat-icon">🎯</div>
         <div className="stat-content">
           <h3>{stats.detectedObjects}</h3>
-          <p>Objects Detected</p>
+          <p>Số đối tượng phát hiện được</p>
         </div>
       </div>
 
@@ -21,7 +21,7 @@ function Statistics({ stats }) {
         <div className="stat-icon">💯</div>
         <div className="stat-content">
           <h3>{stats.averageConfidence}%</h3>
-          <p>Avg Confidence</p>
+          <p>Trung bình độ tự tin dự đoán</p>
         </div>
       </div>
     </div>

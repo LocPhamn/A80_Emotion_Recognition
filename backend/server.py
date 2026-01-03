@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Query, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import cv2
 import numpy as np
 import websockets
@@ -9,8 +10,14 @@ import mysql.connector
 from mysql.connector import Error
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel
 import logging
+import requests
+import os
+from pathlib import Path
+import uuid
+
+# Import models
+from models import VideoResponse, VideoCreate, VideoUpdate, StatisticResponse
 
 # Configure logging
 logging.basicConfig(
@@ -33,23 +40,6 @@ DB_CONFIG = {
     'database': 'video_management',
     'port': 3306
 }
-
-# Pydantic models
-class VideoResponse(BaseModel):
-    idvideo: int
-    video_name: str
-    zone_id: Optional[int]
-    duration: Optional[int]
-    date: Optional[datetime]
-    file_path: Optional[str]
-    status: Optional[str]
-
-class VideoCreate(BaseModel):
-    video_name: str
-    zone_id: Optional[int] = None
-    duration: Optional[int] = None
-    file_path: Optional[str] = None
-    status: Optional[str] = "pending"
 
 # Database helper functions
 def get_db_connection():
@@ -88,6 +78,14 @@ app.add_middleware(
 )
 
 AI_SERVER_URL = "ws://localhost:8001/ws/process"
+AI_SERVER_HTTP = "http://localhost:8001"
+
+# Video storage directory
+VIDEO_STORAGE_DIR = Path("./uploaded_videos")
+VIDEO_STORAGE_DIR.mkdir(exist_ok=True)
+
+# Store processing jobs
+video_processing_jobs = {}
 
 # ===== UPLOAD VIDEO =====
 @app.post("/predict_video")
@@ -160,10 +158,10 @@ async def websocket_endpoint(client_ws: WebSocket):
             )
             
     except Exception as e:
-        print(f"❌ WebSocket error: {e}")
+        print(f"WebSocket error: {e}")
     finally:
         await client_ws.close()
-        print("🔴 WebSocket closed")
+        print("WebSocket closed")
 
 
 @app.get("/health")
@@ -223,6 +221,196 @@ async def check_database():
 @app.get("/")
 async def root():
     return {"message": "Backend Server - Gateway to AI Service"}
+
+
+# ===== VIDEO UPLOAD & PROCESS WITH DATABASE =====
+@app.post("/api/video/upload-process")
+async def upload_and_process_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    zone_id: int = Form(...)
+):
+    """Upload video, process với AI, và lưu vào database"""
+    
+    logger.info(f"📤 Upload video: {file.filename}, Zone ID: {zone_id}")
+    
+    # Validate file type
+    if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ video format: mp4, avi, mov, mkv")
+    
+    try:
+        # Tạo job ID
+        job_id = str(uuid.uuid4())
+        
+        # Upload video lên AI server
+        files = {'file': (file.filename, await file.read(), file.content_type)}
+        response = requests.post(
+            f"{AI_SERVER_HTTP}/api/video/upload-and-process",
+            files=files
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Không thể upload lên AI server")
+        
+        ai_job_id = response.json()['job_id']
+        
+        # Lưu job info
+        video_processing_jobs[job_id] = {
+            "ai_job_id": ai_job_id,
+            "filename": file.filename,
+            "zone_id": zone_id,
+            "status": "processing",
+            "progress": 0
+        }
+        
+        # Background task để poll AI server và lưu vào DB
+        background_tasks.add_task(
+            poll_and_save_video,
+            job_id,
+            ai_job_id,
+            file.filename,
+            zone_id
+        )
+        
+        logger.info(f"✅ Job {job_id} created, AI Job: {ai_job_id}")
+        
+        return {
+            "job_id": job_id,
+            "message": "Video đang được xử lý",
+            "filename": file.filename,
+            "status_url": f"/api/video/process-status/{job_id}"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Upload error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def poll_and_save_video(job_id: str, ai_job_id: str, filename: str, zone_id: int):
+    """Poll AI server status và lưu vào database khi hoàn thành"""
+    
+    try:
+        # Poll AI server
+        while True:
+            await asyncio.sleep(2)  # Poll mỗi 2 giây
+            
+            response = requests.get(f"{AI_SERVER_HTTP}/api/video/status/{ai_job_id}")
+            data = response.json()
+            
+            # Cập nhật progress
+            video_processing_jobs[job_id]["progress"] = data.get("progress", 0)
+            video_processing_jobs[job_id]["status"] = data["status"]
+            
+            if data["status"] == "completed":
+                logger.info(f"✅ AI processing completed for job {job_id}")
+                
+                # Lấy kết quả
+                result = data["result"]
+                
+                # Download processed video
+                download_response = requests.get(
+                    f"{AI_SERVER_HTTP}/api/video/download/{ai_job_id}",
+                    stream=True
+                )
+                
+                # Lưu video vào storage
+                video_name = Path(filename).stem
+                output_filename = f"{video_name}_processed_{job_id}.mp4"
+                output_path = VIDEO_STORAGE_DIR / output_filename
+                
+                with open(output_path, 'wb') as f:
+                    for chunk in download_response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                logger.info(f"✅ Video saved: {output_path}")
+                
+                # Tính duration từ total_frames và fps
+                duration = int(result['total_frames'] / result['fps']) if result['fps'] > 0 else 0
+                
+                # Lưu vào database
+                connection = get_db_connection()
+                cursor = connection.cursor(dictionary=True)
+                
+                try:
+                    # Tạo video record
+                    video_query = """
+                        INSERT INTO video (video_name, zone_id, duration, date, file_path, status)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(video_query, (
+                        filename,
+                        zone_id,
+                        duration,
+                        datetime.now(),
+                        str(output_path),
+                        'process'
+                    ))
+                    connection.commit()
+                    
+                    video_id = cursor.lastrowid
+                    logger.info(f"✅ Video record created: ID={video_id}")
+                    
+                    # Tạo statistic record
+                    emotion_ratios = result['emotion_ratios']
+                    
+                    stat_query = """
+                        INSERT INTO statistic 
+                        (video_id, total_visitor, angry_rate, disgust_rate, fear_rate, 
+                         happy_rate, neutral_rate, sad_rate, surprise_rate)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(stat_query, (
+                        video_id,
+                        result['total_visitor'],
+                        emotion_ratios.get('0', {}).get('ratio', 0),  # angry
+                        emotion_ratios.get('1', {}).get('ratio', 0),  # disgust
+                        emotion_ratios.get('2', {}).get('ratio', 0),  # fear
+                        emotion_ratios.get('3', {}).get('ratio', 0),  # happy
+                        emotion_ratios.get('4', {}).get('ratio', 0),  # neutral
+                        emotion_ratios.get('5', {}).get('ratio', 0),  # sad
+                        emotion_ratios.get('6', {}).get('ratio', 0)   # surprise
+                    ))
+                    connection.commit()
+                    
+                    logger.info(f"✅ Statistic record created for video {video_id}")
+                    
+                    # Cập nhật job status
+                    video_processing_jobs[job_id].update({
+                        "status": "completed",
+                        "video_id": video_id,
+                        "result": result
+                    })
+                    
+                except Error as e:
+                    connection.rollback()
+                    logger.error(f"❌ Database error: {e}")
+                    video_processing_jobs[job_id]["status"] = "failed"
+                    video_processing_jobs[job_id]["error"] = str(e)
+                finally:
+                    close_db_connection(connection, cursor)
+                
+                break
+                
+            elif data["status"] == "failed":
+                logger.error(f"❌ AI processing failed for job {job_id}")
+                video_processing_jobs[job_id]["status"] = "failed"
+                video_processing_jobs[job_id]["error"] = data.get("error", "Unknown error")
+                break
+                
+    except Exception as e:
+        logger.error(f"❌ Error in poll_and_save_video: {e}")
+        video_processing_jobs[job_id]["status"] = "failed"
+        video_processing_jobs[job_id]["error"] = str(e)
+
+
+@app.get("/api/video/process-status/{job_id}")
+async def get_process_status(job_id: str):
+    """Kiểm tra trạng thái xử lý video"""
+    
+    if job_id not in video_processing_jobs:
+        raise HTTPException(status_code=404, detail="Job không tồn tại")
+    
+    return video_processing_jobs[job_id]
 
 
 # ===== VIDEO MANAGEMENT APIs =====

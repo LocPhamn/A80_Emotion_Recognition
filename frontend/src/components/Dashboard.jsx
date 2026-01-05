@@ -18,7 +18,6 @@ function Dashboard() {
     { id: 'webcam', icon: '📹', label: 'Nhận dạng Webcam' },
     { id: 'upload', icon: '📁', label: 'Tải Video lên' },
     { id: 'videos', icon: '🎬', label: 'Quản lý Video' },
-    { id: 'statistics', icon: '📊', label: 'Thống kê' },
     { id: 'history', icon: '📋', label: 'Lịch sử' },
     { id: 'settings', icon: '⚙️', label: 'Cài đặt' }
   ]

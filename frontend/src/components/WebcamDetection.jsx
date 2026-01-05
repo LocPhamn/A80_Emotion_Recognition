@@ -1,5 +1,31 @@
 import { useState, useRef, useEffect } from 'react'
 
+// Helper function: Lấy màu theo emotion
+const getEmotionColor = (emotion) => {
+  const colorMap = {
+    'happy': '#4CAF50',      // Xanh lá
+    'sad': '#2196F3',        // Xanh dương
+    'angry': '#F44336',      // Đỏ
+    'surprise': '#FF9800',   // Cam
+    'fear': '#9C27B0',       // Tím
+    'disgust': '#795548',    // Nâu
+    'neutral': '#9E9E9E'     // Xám
+  }
+  return colorMap[emotion] || '#00BCD4' // Cyan mặc định
+}
+
+// Helper function: Scale tọa độ bbox từ resolution gửi đi về resolution gốc
+const scaleBboxCoordinates = (bbox, scaleFactor) => {
+  // scaleFactor = 1 / scale gửi đi
+  // Ví dụ: Gửi với scale=0.5 → scaleFactor=2
+  return {
+    x: bbox.x * scaleFactor,
+    y: bbox.y * scaleFactor,
+    width: bbox.width * scaleFactor,
+    height: bbox.height * scaleFactor
+  }
+}
+
 function WebcamDetection({ onStats }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
@@ -8,12 +34,13 @@ function WebcamDetection({ onStats }) {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [fps, setFps] = useState(0)
-  const [realFps, setRealFps] = useState(0) // ✅ FPS thực tế từ frontend
+  const [realFps, setRealFps] = useState(0)
   const [tracks, setTracks] = useState([])
   const streamRef = useRef(null)
   const intervalRef = useRef(null)
   const lastFrameTimeRef = useRef(performance.now())
   const fpsHistoryRef = useRef([])
+  const sendScaleRef = useRef(1) // Lưu scale factor để scale tọa độ
 
   const startWebcam = async () => {
     try {
@@ -71,14 +98,13 @@ function WebcamDetection({ onStats }) {
     wsRef.current = ws
 
     ws.onopen = () => {
-      console.log('✅ WebSocket connected!')
+      console.log('WebSocket connected!')
       startSendingFrames()
     }
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data)
       
-      // ✅ TÍNH FPS THỰC TẾ Ở FRONTEND
       const now = performance.now()
       const deltaTime = now - lastFrameTimeRef.current
       lastFrameTimeRef.current = now
@@ -95,17 +121,54 @@ function WebcamDetection({ onStats }) {
         setRealFps(avgFps)
       }
       
-      // Hiển thị frame đã xử lý
-      if (data.frame && canvasRef.current) {
-        const img = new Image()
-        img.onload = () => {
-          const canvas = canvasRef.current
-          const ctx = canvas.getContext('2d')
-          canvas.width = img.width
-          canvas.height = img.height
-          ctx.drawImage(img, 0, 0)
+      // ✅ VẼ VIDEO GỐC + BBOX + EMOTION
+      if (canvasRef.current && videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+        const canvas = canvasRef.current
+        const ctx = canvas.getContext('2d')
+        const video = videoRef.current
+        
+        // Set canvas size theo video
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth
+          canvas.height = video.videoHeight
         }
-        img.src = 'data:image/jpeg;base64,' + data.frame
+        
+        // Vẽ video gốc
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        
+        // Vẽ bbox + emotion cho mỗi track
+        if (data.tracks && data.tracks.length > 0) {
+          // Tính scale factor để scale tọa độ về resolution gốc
+          const scaleFactor = 1 / sendScaleRef.current
+          
+          data.tracks.forEach(track => {
+            const { bbox, emotion, confidence, id } = track
+            
+            // ✅ Scale tọa độ bbox về resolution gốc
+            const scaledBbox = scaleBboxCoordinates(bbox, scaleFactor)
+            
+            // Lấy màu theo emotion
+            const color = getEmotionColor(emotion)
+            
+            // Vẽ bounding box
+            ctx.strokeStyle = color
+            ctx.lineWidth = 3
+            ctx.strokeRect(scaledBbox.x, scaledBbox.y, scaledBbox.width, scaledBbox.height)
+            
+            // Vẽ background cho text
+            const text = `ID:${id} ${emotion} ${(confidence * 100).toFixed(0)}%`
+            ctx.font = 'bold 16px Arial'
+            const textMetrics = ctx.measureText(text)
+            const textHeight = 20
+            
+            ctx.fillStyle = color
+            ctx.fillRect(scaledBbox.x, scaledBbox.y - textHeight - 5, textMetrics.width + 10, textHeight + 5)
+            
+            // Vẽ text
+            ctx.fillStyle = '#ffffff'
+            ctx.fillText(text, scaledBbox.x + 5, scaledBbox.y - 8)
+          })
+        }
       }
 
       // Cập nhật stats
@@ -144,7 +207,7 @@ function WebcamDetection({ onStats }) {
     const now = performance.now();
     const timeSinceLastSend = now - lastSendTime;
     
-    // ✅ THROTTLE: Đảm bảo không gửi quá nhanh
+    // THROTTLE: Đảm bảo không gửi quá nhanh
     if (isProcessing || timeSinceLastSend < minFrameInterval || 
         !videoRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
       requestAnimationFrame(sendFrame);
@@ -155,7 +218,8 @@ function WebcamDetection({ onStats }) {
     lastSendTime = now;
     
     const canvas = document.createElement('canvas');
-    const scale = 0.5; // 640x360 thay vì 1280x720
+    const scale = 1 // nếu muốn giảm độ phân giải gửi lên, thay 1 bằng 0.5 hoặc 0.75
+    sendScaleRef.current = scale // Lưu scale để dùng khi scale tọa độ bbox
     canvas.width = videoRef.current.videoWidth * scale;
     canvas.height = videoRef.current.videoHeight * scale;
     
@@ -214,7 +278,7 @@ function WebcamDetection({ onStats }) {
   return (
     <div className="webcam-section">
       <div className="video-container" style={{ position: 'relative' }}>
-        {/* Video gốc - ẩn đi */}
+        {/* Video gốc - ẩn đi nhưng vẫn render để vẽ lên canvas */}
         <video 
           ref={videoRef} 
           autoPlay 

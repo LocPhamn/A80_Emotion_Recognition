@@ -18,6 +18,8 @@ function VideoManagement() {
   const [showModal, setShowModal] = useState(false)
   const [selectedVideo, setSelectedVideo] = useState(null)
   const [statistics, setStatistics] = useState(null)
+  const [showVideoPlayer, setShowVideoPlayer] = useState(false)
+  const [playingVideo, setPlayingVideo] = useState(null)
 
   // Fetch videos
   const fetchVideos = async () => {
@@ -79,6 +81,12 @@ function VideoManagement() {
     } catch (err) {
       alert('Không thể xóa video: ' + (err.response?.data?.detail || err.message))
     }
+  }
+
+  // Play video
+  const handlePlayVideo = (video) => {
+    setPlayingVideo(video)
+    setShowVideoPlayer(true)
   }
 
   // Update video status
@@ -236,6 +244,15 @@ function VideoManagement() {
                   </td>
                   <td className="vm-actions">
                     <button
+                      onClick={() => handlePlayVideo(video)}
+                      className="vm-btn vm-btn-play"
+                      title="Phát video"
+                      disabled={!video.file_path}
+                    >
+                      ▶️
+                    </button>
+
+                    <button
                       onClick={() => handleViewDetails(video)}
                       className="vm-btn vm-btn-view"
                       title="Xem chi tiết"
@@ -380,6 +397,56 @@ function VideoManagement() {
                     Chưa có dữ liệu thống kê cho video này
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Video Player Modal */}
+      {showVideoPlayer && playingVideo && (
+        <div className="vm-modal-overlay" onClick={() => setShowVideoPlayer(false)}>
+          <div className="vm-modal vm-video-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="vm-modal-header">
+              <h2>🎬 {playingVideo.video_name}</h2>
+              <button onClick={() => setShowVideoPlayer(false)} className="vm-modal-close">
+                ✕
+              </button>
+            </div>
+            
+            <div className="vm-modal-body">
+              <div className="vm-video-player">
+                <video 
+                  controls 
+                  autoPlay
+                  width="100%"
+                  style={{ maxHeight: '70vh', borderRadius: '8px', backgroundColor: '#000' }}
+                  onError={(e) => {
+                    console.error('Video error:', e)
+                    alert('Không thể phát video. Video có thể sử dụng codec không được trình duyệt hỗ trợ. Vui lòng thử convert sang H.264 format.')
+                  }}
+                  onLoadedMetadata={(e) => {
+                    console.log('Video loaded:', {
+                      duration: e.target.duration,
+                      videoWidth: e.target.videoWidth,
+                      videoHeight: e.target.videoHeight
+                    })
+                    if (e.target.videoWidth === 0 || e.target.videoHeight === 0) {
+                      alert('Video không có video stream hoặc codec không được hỗ trợ!')
+                    }
+                  }}
+                >
+                  <source 
+                    src={`http://localhost:8000/api/videos/${playingVideo.idvideo}/stream`}
+                  />
+                  Trình duyệt của bạn không hỗ trợ video tag.
+                </video>
+              </div>
+              
+              <div className="vm-video-info">
+                <p><strong>Zone:</strong> {playingVideo.zone_id || 'N/A'}</p>
+                <p><strong>Thời lượng:</strong> {formatDuration(playingVideo.duration)}</p>
+                <p><strong>Ngày tải:</strong> {formatDate(playingVideo.date)}</p>
               </div>
             </div>
           </div>

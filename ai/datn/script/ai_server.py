@@ -70,14 +70,9 @@ async def ai_websocket(ws: WebSocket):
             # Xử lý frame
             result = tracker.process_frame(frame)
             
-            # GIẢM CHẤT LƯỢNG JPEG khi encode
-            _, buffer = cv2.imencode('.jpg', result['frame'], [
-                cv2.IMWRITE_JPEG_QUALITY, 70  # Giảm từ 85 xuống 70
-            ])
-            frame_base64 = base64.b64encode(buffer).decode('utf-8')
-            
+            # ✅ OPTIMIZATION: Chỉ gửi metadata, không gửi ảnh
+            # Giảm bandwidth 100x (từ ~400KB xuống ~2KB)
             await ws.send_json({
-                'frame': frame_base64,
                 'fps': result['fps'],
                 'tracks': result['tracks']
             })

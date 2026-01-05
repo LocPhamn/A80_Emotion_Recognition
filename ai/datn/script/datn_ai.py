@@ -316,7 +316,19 @@ class FaceEmotionTracker:
         Returns:
             Dict chứa thông tin xử lý
         """
+        # Track unique visitor IDs
+        visited_ids = set()  # Lưu các track ID duy nhất
+        emotion_count_per_id = defaultdict(lambda: defaultdict(int))  # Đếm số lần mỗi emotion xuất hiện cho mỗi ID
         
+        emotion_visitors = {
+            '0': 0,  # angry
+            '1': 0,  # disgust
+            '2': 0,  # fear
+            '3': 0,  # happy
+            '4': 0,  # neutral
+            '5': 0,  # sad
+            '6': 0   # surprise
+        }        
         # Kiểm tra file input
         if not os.path.exists(input_video_path):
             raise FileNotFoundError(f"Video không tồn tại: {input_video_path}")
@@ -396,6 +408,18 @@ class FaceEmotionTracker:
                 result = tracker.process_frame(frame)
                 processed_frame = result['frame']
                 
+                # Đếm unique visitors và emotions
+                for track in result['tracks']:
+                    track_id = track['id']
+                    emotion = track['emotion']
+                    
+                    # Thêm ID vào set unique visitors
+                    visited_ids.add(track_id)
+                    
+                    # Đếm số lần xuất hiện của mỗi emotion cho ID này
+                    if emotion in ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']:
+                        emotion_count_per_id[track_id][emotion] += 1
+                
                 # Ghi frame đã xử lý
                 out.write(processed_frame)
                 processed_frames += 1
@@ -429,12 +453,46 @@ class FaceEmotionTracker:
             if show_preview:
                 cv2.destroyAllWindows()
         
+        # Tính tổng khách duy nhất
+        total_visitor = len(visited_ids)
+        
+        # Xác định emotion chi phối cho mỗi visitor (emotion xuất hiện nhiều nhất)
+        emotion_map = {
+            'angry': '0',
+            'disgust': '1',
+            'fear': '2',
+            'happy': '3',
+            'neutral': '4',
+            'sad': '5',
+            'surprise': '6'
+        }
+        
+        for track_id in visited_ids:
+            if track_id in emotion_count_per_id:
+                # Lấy emotion xuất hiện nhiều nhất cho ID này
+                emotions = emotion_count_per_id[track_id]
+                if emotions:
+                    dominant_emotion = max(emotions, key=emotions.get)
+                    emotion_key = emotion_map[dominant_emotion]
+                    emotion_visitors[emotion_key] += 1
+        
+        # lấy tỉ lệ cảm xúc
+        emotion_ratios = {}
+        for key, count in emotion_visitors.items():
+            ratio = (count / total_visitor) if total_visitor > 0 else 0
+            emotion_ratios[key] = {
+                'ratio': ratio
+            }
+        
+        
         # Tổng kết
         print(f"\nHoàn thành!")
         print(f"Đã xử lý: {processed_frames}/{total_frames} frames")
         print(f"Video đã lưu tại: {output_video_path}")
         
         return {
+            'total_visitor': total_visitor,
+            'emotion_ratios': emotion_ratios,
             'input_path': input_video_path,
             'output_path': output_video_path,
             'total_frames': total_frames,

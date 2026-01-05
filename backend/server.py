@@ -15,6 +15,9 @@ import requests
 import os
 from pathlib import Path
 import uuid
+import mimetypes
+import subprocess
+import shutil
 
 # Import models
 from models import VideoResponse, VideoCreate, VideoUpdate, StatisticResponse
@@ -24,11 +27,16 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backend.log'),
+        logging.FileHandler('backend.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Set console handler encoding to utf-8
+for handler in logger.handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+        handler.stream.reconfigure(encoding='utf-8') if hasattr(handler.stream, 'reconfigure') else None
 
 app = FastAPI()
 
@@ -86,6 +94,51 @@ VIDEO_STORAGE_DIR.mkdir(exist_ok=True)
 
 # Store processing jobs
 video_processing_jobs = {}
+
+
+def convert_to_web_compatible(input_path: Path, output_path: Path) -> bool:
+    """Convert video to H.264 + AAC for web browser compatibility"""
+    try:
+        logger.info(f"[CONVERT] Converting video to web-compatible format: {input_path.name}")
+        
+        # Check if ffmpeg is available
+        if not shutil.which('ffmpeg'):
+            logger.warning("[CONVERT] ffmpeg not found, skipping conversion")
+            return False
+        
+        cmd = [
+            'ffmpeg',
+            '-i', str(input_path),
+            '-c:v', 'libx264',      # H.264 video codec
+            '-preset', 'fast',      # Encoding speed
+            '-crf', '23',           # Quality (lower = better, 18-28 recommended)
+            '-c:a', 'aac',          # AAC audio codec
+            '-b:a', '128k',         # Audio bitrate
+            '-movflags', '+faststart',  # Enable progressive streaming
+            '-y',                   # Overwrite output file
+            str(output_path)
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300  # 5 minutes timeout
+        )
+        
+        if result.returncode == 0:
+            logger.info(f"[CONVERT] Video converted successfully: {output_path.name}")
+            return True
+        else:
+            logger.error(f"[CONVERT] ffmpeg conversion failed: {result.stderr.decode()}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.error("[CONVERT] Video conversion timeout (>5 minutes)")
+        return False
+    except Exception as e:
+        logger.error(f"[CONVERT] Error converting video: {e}")
+        return False
 
 # ===== UPLOAD VIDEO =====
 @app.post("/predict_video")
@@ -221,7 +274,7 @@ async def check_database():
 @app.get("/")
 async def root():
     return {"message": "Backend Server - Gateway to AI Service"}
-
+os.makedirs('video_storage', exist_ok=True)
 
 # ===== VIDEO UPLOAD & PROCESS WITH DATABASE =====
 @app.post("/api/video/upload-process")
@@ -322,7 +375,23 @@ async def poll_and_save_video(job_id: str, ai_job_id: str, filename: str, zone_i
                     for chunk in download_response.iter_content(chunk_size=8192):
                         f.write(chunk)
                 
-                logger.info(f"✅ Video saved: {output_path}")
+                logger.info(f"[UPLOAD] Video saved: {output_path}")
+                
+                # Convert video to web-compatible format (H.264 + AAC)
+                converted_path = output_path.parent / f"{output_path.stem}_web{output_path.suffix}"
+                if convert_to_web_compatible(output_path, converted_path):
+                    # Use converted video
+                    final_video_path = converted_path
+                    # Delete original non-compatible video
+                    try:
+                        output_path.unlink()
+                        logger.info(f"[CLEANUP] Deleted original video: {output_path.name}")
+                    except Exception as e:
+                        logger.warning(f"[CLEANUP] Could not delete original video: {e}")
+                else:
+                    # Use original video if conversion failed
+                    logger.warning("[CONVERT] Using original video (conversion failed or ffmpeg not available)")
+                    final_video_path = output_path
                 
                 # Tính duration từ total_frames và fps
                 duration = int(result['total_frames'] / result['fps']) if result['fps'] > 0 else 0
@@ -342,7 +411,7 @@ async def poll_and_save_video(job_id: str, ai_job_id: str, filename: str, zone_i
                         zone_id,
                         duration,
                         datetime.now(),
-                        str(output_path),
+                        str(final_video_path),
                         'process'
                     ))
                     connection.commit()
@@ -600,6 +669,44 @@ async def delete_video(video_id: int):
     except Error as e:
         logger.error(f"❌ Error deleting video {video_id}: {e}")
         connection.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        close_db_connection(connection, cursor)
+
+
+@app.get("/api/videos/{video_id}/stream")
+async def stream_video(video_id: int):
+    """Stream video file"""
+    logger.info(f"🎬 Stream video request for ID: {video_id}")
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    
+    try:
+        cursor.execute("SELECT file_path FROM video WHERE idvideo = %s", (video_id,))
+        video = cursor.fetchone()
+        
+        if not video or not video['file_path']:
+            raise HTTPException(status_code=404, detail="Video file not found")
+        
+        file_path = Path(video['file_path'])
+        
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Video file does not exist on disk")
+        
+        # Auto-detect MIME type based on file extension
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        if not mime_type or not mime_type.startswith('video/'):
+            mime_type = "video/mp4"  # Fallback to mp4
+        
+        logger.info(f"📹 Streaming video with MIME type: {mime_type}")
+        
+        return FileResponse(
+            path=str(file_path),
+            media_type=mime_type,
+            filename=file_path.name
+        )
+        
+    except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
         close_db_connection(connection, cursor)

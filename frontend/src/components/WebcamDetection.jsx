@@ -36,6 +36,14 @@ function WebcamDetection({ onStats }) {
   const [fps, setFps] = useState(0)
   const [realFps, setRealFps] = useState(0)
   const [tracks, setTracks] = useState([])
+  
+  // Recording state
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordingSessionId, setRecordingSessionId] = useState(null)
+  const [recordingFrameCount, setRecordingFrameCount] = useState(0)
+  const [recordingStartTime, setRecordingStartTime] = useState(null)
+  const [zoneId, setZoneId] = useState(1)
+  
   const streamRef = useRef(null)
   const intervalRef = useRef(null)
   const lastFrameTimeRef = useRef(performance.now())
@@ -104,6 +112,30 @@ function WebcamDetection({ onStats }) {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data)
+      
+      // Xử lý recording status messages
+      if (data.type === 'recording_started') {
+        console.log('🔴 Recording started:', data.session_id)
+        setIsRecording(true)
+        setRecordingSessionId(data.session_id)
+        setRecordingFrameCount(0)
+        setRecordingStartTime(Date.now())
+        return
+      }
+      
+      if (data.type === 'recording_stopped') {
+        console.log('⏹️ Recording stopped:', data.session_id, 'frames:', data.frame_count)
+        setIsRecording(false)
+        
+        // Gọi API để lưu recording vào database
+        handleRecordingComplete(data.session_id, data.frame_count)
+        return
+      }
+      
+      // Update recording frame count
+      if (data.recording && data.frame_count) {
+        setRecordingFrameCount(data.frame_count)
+      }
       
       const now = performance.now()
       const deltaTime = now - lastFrameTimeRef.current
@@ -239,7 +271,88 @@ function WebcamDetection({ onStats }) {
   requestAnimationFrame(sendFrame);
 };
 
+  const startRecording = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Gửi command start recording qua WebSocket
+      wsRef.current.send(JSON.stringify({
+        command: 'start_recording'
+      }))
+      console.log('📤 Sent start_recording command')
+    } else {
+      console.error('❌ WebSocket not ready')
+      setError('WebSocket chưa kết nối')
+    }
+  }
+
+  const stopRecording = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Gửi command stop recording qua WebSocket
+      wsRef.current.send(JSON.stringify({
+        command: 'stop_recording'
+      }))
+      console.log('📤 Sent stop_recording command')
+    } else {
+      console.error('❌ WebSocket not ready')
+      setError('WebSocket chưa kết nối')
+    }
+  }
+
+  const handleRecordingComplete = async (sessionId, frameCount) => {
+    console.log('💾 Saving recording to database...')
+    
+    try {
+      // Tính duration từ frame count (giả sử 15 FPS)
+      const duration = frameCount / 15.0
+      
+      // Tạo statistics giả (vì ta không có emotion tracking trong quá trình recording)
+      // Trong thực tế, bạn có thể thu thập stats trong quá trình recording
+      const statistics = {
+        total_visitor: 0,
+        emotion_ratios: {
+          'angry': { ratio: 0 },
+          'disgust': { ratio: 0 },
+          'fear': { ratio: 0 },
+          'happy': { ratio: 0 },
+          'neutral': { ratio: 0 },
+          'sad': { ratio: 0 },
+          'surprise': { ratio: 0 }
+        }
+      }
+      
+      // Gọi API backend để lưu recording
+      const formData = new FormData()
+      formData.append('session_id', sessionId)
+      formData.append('video_path', `webcam_${sessionId}.mp4`)
+      formData.append('duration', duration.toString())
+      formData.append('statistics', JSON.stringify(statistics))
+      formData.append('zone_id', zoneId.toString())
+      
+      const response = await fetch('http://localhost:8000/api/webcam/save-recording', {
+        method: 'POST',
+        body: formData
+      })
+      
+      if (!response.ok) {
+        throw new Error('Failed to save recording')
+      }
+      
+      const result = await response.json()
+      console.log('✅ Recording saved:', result)
+      
+      alert(`Recording đã lưu thành công!\nVideo ID: ${result.video_id}\nDuration: ${duration.toFixed(1)}s`)
+      
+    } catch (err) {
+      console.error('❌ Failed to save recording:', err)
+      setError('Không thể lưu recording: ' + err.message)
+    }
+  }
+
   const stopWebcam = () => {
+    // Dừng recording nếu đang recording
+    if (isRecording) {
+      stopRecording()
+    }
+    
     // Dừng gửi frames
     if (intervalRef.current) {
       clearInterval(intervalRef.current)
@@ -261,6 +374,9 @@ function WebcamDetection({ onStats }) {
     }
     
     setIsActive(false)
+    setIsRecording(false)
+    setRecordingSessionId(null)
+    setRecordingFrameCount(0)
     setLoading(false)
     setError(null)
     setFps(0)
@@ -352,11 +468,89 @@ function WebcamDetection({ onStats }) {
             {loading ? '⏳ Đang tải...' : '▶️ Bắt đầu Webcam'}
           </button>
         ) : (
-          <button onClick={stopWebcam} className="btn-danger">
-            ⏹️ Ngừng Webcam
-          </button>
+          <>
+            <button onClick={stopWebcam} className="btn-danger">
+              ⏹️ Ngừng Webcam
+            </button>
+            
+            {!isRecording ? (
+              <button 
+                onClick={startRecording} 
+                className="btn-success"
+                style={{ marginLeft: '10px' }}
+              >
+                🔴 Bắt đầu Ghi
+              </button>
+            ) : (
+              <button 
+                onClick={stopRecording} 
+                className="btn-warning"
+                style={{ marginLeft: '10px' }}
+              >
+                ⏹️ Dừng Ghi
+              </button>
+            )}
+            
+            <div style={{ 
+              display: 'inline-block', 
+              marginLeft: '20px',
+              fontSize: '0.9rem' 
+            }}>
+              <label htmlFor="zone-select">Zone ID: </label>
+              <select 
+                id="zone-select"
+                value={zoneId} 
+                onChange={(e) => setZoneId(parseInt(e.target.value))}
+                disabled={isRecording}
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: '5px',
+                  border: '1px solid #ccc',
+                  marginLeft: '5px'
+                }}
+              >
+                <option value={1}>Zone 1</option>
+                <option value={2}>Zone 2</option>
+                <option value={3}>Zone 3</option>
+              </select>
+            </div>
+          </>
         )}
       </div>
+
+      {isRecording && (
+        <div style={{
+          marginTop: '15px',
+          padding: '15px',
+          background: '#ffebee',
+          borderRadius: '10px',
+          border: '2px solid #f44336'
+        }}>
+          <div style={{ 
+            display: 'flex', 
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '15px'
+          }}>
+            <div style={{
+              width: '15px',
+              height: '15px',
+              borderRadius: '50%',
+              background: '#f44336',
+              animation: 'pulse 1.5s infinite'
+            }}></div>
+            <span style={{ fontWeight: 'bold', color: '#f44336' }}>
+              🔴 ĐANG GHI VIDEO
+            </span>
+            <span style={{ color: '#666' }}>
+              Frames: {recordingFrameCount}
+            </span>
+            <span style={{ color: '#666' }}>
+              Duration: {recordingStartTime ? ((Date.now() - recordingStartTime) / 1000).toFixed(1) : 0}s
+            </span>
+          </div>
+        </div>
+      )}
 
       {isActive && (
         <div style={{

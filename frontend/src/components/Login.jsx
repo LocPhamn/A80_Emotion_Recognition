@@ -24,15 +24,34 @@ function Login({ onLogin }) {
 
     setLoading(true)
     
-    // Simulate login - Replace with actual API call
-    setTimeout(() => {
-      if (username === 'admin' && password === 'admin123') {
-        onLogin({ username, role: 'admin' })
+    try {
+      // Call API login
+      const formData = new FormData()
+      formData.append('username', username)
+      formData.append('password', password)
+      
+      const response = await fetch('http://localhost:8000/api/login', {
+        method: 'POST',
+        body: formData
+      })
+      
+      const data = await response.json()
+      
+      if (data.success) {
+        onLogin({ 
+          username: data.username, 
+          role: data.role,
+          user_id: data.user_id 
+        })
       } else {
-        setError('Tên đăng nhập hoặc mật khẩu không đúng')
+        setError(data.message || 'Tên đăng nhập hoặc mật khẩu không đúng')
         setLoading(false)
       }
-    }, 1000)
+    } catch (error) {
+      console.error('Login error:', error)
+      setError('Lỗi kết nối đến server')
+      setLoading(false)
+    }
   }
 
   return (
@@ -43,10 +62,7 @@ function Login({ onLogin }) {
       </div>
       
       <div className="login-box">
-        <div className="login-header">
-          <div className="login-logo">
-            🤖
-          </div>
+       <div className="login-header">
           <h1>AI Vision</h1>
           <p>Admin Panel</p>
         </div>

@@ -71,7 +71,7 @@ def get_emotion_color(emotion):
     return emotion_colors.get(emotion, (255, 255, 255))
 
 
-def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, track_emotions, fps=0, predict_emotion=True):
+def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, track_emotions, fps=0, predict_emotion=True, get_stable_emotion_func=None):
     """Vẽ kết quả tracking và cảm xúc lên frame"""
     # Vẽ FPS và số lượng tracks
     cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
@@ -105,9 +105,14 @@ def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, t
         if len(face_crops) > 0:
             emotion_results = emotion_classifier.predict_batch(face_crops)
             
-            # Lưu kết quả vào cache
+            # Lưu kết quả vào cache với smoothing
             for track_id, (emotion, conf) in zip(valid_tracks, emotion_results):
-                track_emotions[track_id] = (emotion, conf)
+                # Sử dụng stable emotion nếu có hàm smoothing
+                if get_stable_emotion_func:
+                    stable_emotion, stable_conf = get_stable_emotion_func(track_id, emotion, conf)
+                    track_emotions[track_id] = (stable_emotion, stable_conf)
+                else:
+                    track_emotions[track_id] = (emotion, conf)
 
     # Vẽ visualization cho từng track
     for track in online_targets:
@@ -176,23 +181,26 @@ class FaceEmotionTracker:
             track_thresh=0.5,
             track_buffer=30,
             match_thresh=0.8,
-            show_trajectory=False
+            show_trajectory=False,
+            use_grayscale=False
     ):
         """Khởi tạo tracker"""
         print(f"Loading YOLO model: {model_path}")
         self.model = YOLO(model_path)
-        
+
         if torch.cuda.is_available():
             self.model.to('cuda')
-            print("✅ Using GPU for YOLO")
-        
+            print("đang sử dụng GPU cho YOLO")
+
         self.input_size = 960
-        
-        print(f"Loading Emotion Classifier: {emotion_weights_path}")
+        self.use_grayscale = use_grayscale
+
+        print(f"Khởi động Emotion Classifier: {emotion_weights_path}")
+        print(f"🎨 RGB mode: 3 kênh màu")
         self.emotion_classifier = EmotionClassifier(emotion_weights_path)
-        
- 
-        self.emotion_cache_frames = 3  # Chỉ predict emotion mỗi 3 frames
+
+
+        self.emotion_cache_frames = 5
         self.frame_count = 0
 
         # Khởi tạo ByteTracker
@@ -203,7 +211,9 @@ class FaceEmotionTracker:
 
         self.tracker = BYTETracker(args, frame_rate=30)
 
-        self.track_emotions = {}
+        self.track_emotions = {}  # Current emotion display
+        self.emotion_history = defaultdict(lambda: [])  # Lịch sử emotions cho smoothing
+        self.emotion_history_size = 10  # Lưu 10 predictions gần nhất
         self.track_history = defaultdict(lambda: [])
         self.show_trajectory = show_trajectory
 
@@ -211,28 +221,54 @@ class FaceEmotionTracker:
         self.fps = 0
         self.fps_history = []  # Lưu lịch sử FPS
         self.fps_avg_window = 30  # Trung bình 30 frames
-        
+
         print("Đã khởi tạo FaceEmotionTracker!")
+
+    def get_stable_emotion(self, track_id, new_emotion, new_confidence):
+        """Lấy emotion ổn định bằng majority voting từ lịch sử"""
+        # Thêm emotion mới vào history
+        self.emotion_history[track_id].append((new_emotion, new_confidence))
+        
+        # Giới hạn size của history
+        if len(self.emotion_history[track_id]) > self.emotion_history_size:
+            self.emotion_history[track_id].pop(0)
+        
+        # Nếu history còn ít, trả về emotion mới
+        if len(self.emotion_history[track_id]) < 3:
+            return new_emotion, new_confidence
+        
+        # Đếm số lần xuất hiện của mỗi emotion trong history
+        from collections import Counter
+        emotion_counts = Counter([emo for emo, conf in self.emotion_history[track_id]])
+        
+        # Lấy emotion xuất hiện nhiều nhất (majority voting)
+        most_common_emotion = emotion_counts.most_common(1)[0][0]
+        
+        # Tính confidence trung bình của emotion được chọn
+        confidences = [conf for emo, conf in self.emotion_history[track_id] if emo == most_common_emotion]
+        avg_confidence = sum(confidences) / len(confidences) if confidences else new_confidence
+        
+        return most_common_emotion, avg_confidence
 
     def process_frame(self, frame):
         """Xử lý một frame và trả về kết quả"""
         curr_time = time.time()
         delta_time = curr_time - self.prev_time
-        
+
         if delta_time > 0:
             instant_fps = 1.0 / delta_time
             self.fps_history.append(instant_fps)
-            
+
             if len(self.fps_history) > self.fps_avg_window:
                 self.fps_history.pop(0)
-            
+
             self.fps = sum(self.fps_history) / len(self.fps_history)
-        
+
         self.prev_time = curr_time
         self.frame_count += 1
 
         height, width = frame.shape[:2]
-        
+
         # YOLO Detection với size nhỏ hơn
         results = self.model(frame, imgsz=self.input_size, verbose=False)
 
@@ -250,12 +286,13 @@ class FaceEmotionTracker:
 
         # CACHE EMOTION - chỉ predict mỗi N frames
         should_predict_emotion = (self.frame_count % self.emotion_cache_frames == 0)
-        
+
         # hiển thị với emotion
         visualize_frame = visualize_tracking_with_emotion(
             frame, online_targets, self.emotion_classifier,
             self.track_emotions, int(self.fps),
-            predict_emotion=should_predict_emotion
+            predict_emotion=should_predict_emotion,
+            get_stable_emotion_func=self.get_stable_emotion
         )
 
         # Tạo metadata
@@ -264,7 +301,7 @@ class FaceEmotionTracker:
             track_id = track.track_id
             tlwh = track.tlwh
             emotion, emotion_conf = self.track_emotions.get(track_id, ("unknown", 0.0))
-            
+
             tracks_info.append({
                 'id': int(track_id),
                 'bbox': {
@@ -277,18 +314,19 @@ class FaceEmotionTracker:
                 'confidence': float(emotion_conf),
                 'color': get_emotion_color(emotion)
             })
-        
+
         return {
             'frame': visualize_frame,
             'fps': float(self.fps),
             'tracks': tracks_info
         }
-        
+
 # ====== RESET FUNCTION ======
     def reset(self):
         """Reset tracker state"""
         self.tracker = BYTETracker(Args(), frame_rate=30)
         self.track_emotions = {}
+        self.emotion_history = defaultdict(lambda: [])
         self.track_history = defaultdict(lambda: [])
         print("Tracker reset!")
 
@@ -300,11 +338,12 @@ class FaceEmotionTracker:
         yolo_model_path=r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\model_weights\yolo_models\yolov11s_custom.pt",
         emotion_model_path=r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\model_weights\mobilenet_models\mobilenetv3_best_weights_only.pth",
         show_preview=False,
-        skip_frames=1
+        skip_frames=1,
+        use_grayscale=False
     ):
         """
         Xử lý video với face tracking và emotion detection
-        
+
         Args:
             input_video_path: Đường dẫn đến video input
             output_video_path: Đường dẫn lưu video output (mặc định: input_processed.mp4)
@@ -312,14 +351,15 @@ class FaceEmotionTracker:
             emotion_model_path: Đường dẫn model emotion (optional)
             show_preview: Hiển thị preview trong khi xử lý
             skip_frames: Bỏ qua N frames để tăng tốc (1 = xử lý tất cả)
-        
+            use_grayscale: Sử dụng model grayscale 1 kênh (True) hay RGB 3 kênh (False)
+
         Returns:
             Dict chứa thông tin xử lý
         """
         # Track unique visitor IDs
         visited_ids = set()  # Lưu các track ID duy nhất
         emotion_count_per_id = defaultdict(lambda: defaultdict(int))  # Đếm số lần mỗi emotion xuất hiện cho mỗi ID
-        
+
         emotion_visitors = {
             '0': 0,  # angry
             '1': 0,  # disgust
@@ -328,43 +368,43 @@ class FaceEmotionTracker:
             '4': 0,  # neutral
             '5': 0,  # sad
             '6': 0   # surprise
-        }        
+        }
         # Kiểm tra file input
         if not os.path.exists(input_video_path):
             raise FileNotFoundError(f"Video không tồn tại: {input_video_path}")
-        
+
         # Tạo output path nếu chưa có
         if output_video_path is None:
             input_path = Path(input_video_path)
             output_video_path = str(input_path.parent / f"{input_path.stem}_processed{input_path.suffix}")
-        
+
         # Tạo thư mục output nếu chưa có
         os.makedirs(os.path.dirname(output_video_path) or ".", exist_ok=True)
-        
+
         print(f"Input video: {input_video_path}")
         print(f"Output video: {output_video_path}")
-        
+
         # Mở video
         cap = cv2.VideoCapture(input_video_path)
         if not cap.isOpened():
             raise ValueError(f"Không thể mở video: {input_video_path}")
-        
+
         # Lấy thông tin video
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+
         print(f"Video info: {width}x{height} @ {fps}fps, {total_frames} frames")
         print(f"Thời lượng: {total_frames/fps:.2f} giây")
-        
+
         # Khởi tạo VideoWriter
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # hoặc 'XVID', 'H264'
         out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
-        
+
         if not out.isOpened():
             raise ValueError(f"Không thể tạo video output: {output_video_path}")
-        
+
         # Khởi tạo tracker
         print(f"Đang khởi tạo FaceEmotionTracker...")
         tracker_kwargs = {}
@@ -372,6 +412,7 @@ class FaceEmotionTracker:
             tracker_kwargs['model_path'] = yolo_model_path
         if emotion_model_path:
             tracker_kwargs['emotion_weights_path'] = emotion_model_path
+        tracker_kwargs['use_grayscale'] = use_grayscale
         
         tracker = FaceEmotionTracker(**tracker_kwargs)
         

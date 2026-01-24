@@ -7,7 +7,9 @@ import numpy as np
 import base64
 import os
 import uuid
+import json
 from pathlib import Path
+from datetime import datetime
 from fastapi import UploadFile, File, BackgroundTasks
 from typing import Optional
 import traceback
@@ -29,11 +31,16 @@ tracker = FaceEmotionTracker()
 # Setup video directories
 TEMP_DIR = Path("./temp_videos")
 OUTPUT_DIR = Path("./output_videos")
+WEBCAM_RECORDINGS_DIR = Path("./webcam_recordings")
 TEMP_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+WEBCAM_RECORDINGS_DIR.mkdir(exist_ok=True)
 
 # Lưu trạng thái các job đang xử lý
 video_jobs = {}
+
+# Lưu trạng thái webcam recording sessions
+webcam_sessions = {}
 
 @app.websocket("/ws/process")
 async def ai_websocket(ws: WebSocket):
@@ -41,21 +48,115 @@ async def ai_websocket(ws: WebSocket):
     print("✅ AI WebSocket connected!")
     
     is_processing = False  
-    frame_skip_count = 0  
+    frame_skip_count = 0
+    
+    # Recording state
+    session_id = None
+    video_writer = None
+    recording = False
+    frame_count = 0
     
     try:
         while True:
-            # Nhận frame
-            data = await ws.receive_bytes()
+            # Nhận data từ WebSocket (có thể là binary frame hoặc JSON command)
+            message = await ws.receive()
+            
+            # Xử lý JSON command (start/stop recording)
+            if "text" in message:
+                try:
+                    command_data = json.loads(message["text"])
+                    command = command_data.get("command")
+                    
+                    # START RECORDING
+                    if command == "start_recording":
+                        session_id = str(uuid.uuid4())
+                        recording = True
+                        frame_count = 0
+                        
+                        # Tạo video writer
+                        video_filename = f"webcam_{session_id}.mp4"
+                        video_path = WEBCAM_RECORDINGS_DIR / video_filename
+                        
+                        # Sử dụng codec mp4v và FPS thấp hơn
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        video_writer = cv2.VideoWriter(
+                            str(video_path),
+                            fourcc,
+                            15.0,  # 15 FPS cho webcam recording
+                            (640, 480)
+                        )
+                        
+                        # Lưu session
+                        webcam_sessions[session_id] = {
+                            "status": "recording",
+                            "video_path": str(video_path),
+                            "start_time": datetime.now().isoformat(),
+                            "frame_count": 0
+                        }
+                        
+                        await ws.send_json({
+                            "type": "recording_started",
+                            "session_id": session_id
+                        })
+                        
+                        print(f"🔴 Recording started: {session_id}")
+                        continue
+                    
+                    # STOP RECORDING
+                    elif command == "stop_recording":
+                        if recording and video_writer:
+                            recording = False
+                            video_writer.release()
+                            video_writer = None
+                            
+                            # Cập nhật session
+                            if session_id in webcam_sessions:
+                                webcam_sessions[session_id].update({
+                                    "status": "completed",
+                                    "end_time": datetime.now().isoformat(),
+                                    "frame_count": frame_count
+                                })
+                            
+                            await ws.send_json({
+                                "type": "recording_stopped",
+                                "session_id": session_id,
+                                "frame_count": frame_count
+                            })
+                            
+                            print(f"⏹️ Recording stopped: {session_id}, frames: {frame_count}")
+                            
+                            # KHÔNG xóa session - giữ lại để có thể download sau
+                        continue
+                        
+                except json.JSONDecodeError:
+                    print("⚠️ Invalid JSON command")
+                    continue
+            
+            # Xử lý binary frame data
+            if "bytes" not in message:
+                continue
+                
+            data = message["bytes"]
             
             # SKIP FRAME nếu đang xử lý
             if is_processing:
                 frame_skip_count += 1
+                
+                # Vẫn ghi frame vào video nếu đang recording (không skip)
+                if recording and video_writer:
+                    np_arr = np.frombuffer(data, np.uint8)
+                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        # Resize frame về 640x480
+                        frame_resized = cv2.resize(frame, (640, 480))
+                        video_writer.write(frame_resized)
+                        frame_count += 1
+                
                 continue
             
             # LOG CẢNH BÁO nếu skip quá nhiều frame
             if frame_skip_count > 5:
-                print(f" Bỏ qua {frame_skip_count} frames do xử lý chậm")
+                print(f"⚠️ Bỏ qua {frame_skip_count} frames do xử lý chậm")
             frame_skip_count = 0
                 
             is_processing = True
@@ -67,29 +168,46 @@ async def ai_websocket(ws: WebSocket):
                 is_processing = False
                 continue
 
-            # Xử lý frame
+            # Xử lý frame với AI
             result = tracker.process_frame(frame)
             
+            # GHI FRAME VÀO VIDEO nếu đang recording
+            if recording and video_writer:
+                # Lấy processed frame với bbox và emotion
+                processed_frame = result['frame']
+                # Resize về 640x480
+                frame_resized = cv2.resize(processed_frame, (640, 480))
+                video_writer.write(frame_resized)
+                frame_count += 1
+            
             # ✅ OPTIMIZATION: Chỉ gửi metadata, không gửi ảnh
-            # Giảm bandwidth 100x (từ ~400KB xuống ~2KB)
             await ws.send_json({
                 'fps': result['fps'],
-                'tracks': result['tracks']
+                'tracks': result['tracks'],
+                'recording': recording,
+                'frame_count': frame_count if recording else 0
             })
             
             is_processing = False
     
     except WebSocketDisconnect:
-        print(" Client không còn kết nối, đóng WebSocket")
+        print("⚠️ Client không còn kết nối, đóng WebSocket")
     except Exception as e:
-        print(f"AI Websocket gặp lỗi: {e}")
+        print(f"❌ AI Websocket gặp lỗi: {e}")
         import traceback
         traceback.print_exc()
     finally:
+        # Cleanup recording nếu còn đang mở
+        if video_writer:
+            video_writer.release()
+            if session_id and session_id in webcam_sessions:
+                webcam_sessions[session_id]["status"] = "interrupted"
+            print(f"🧹 Video writer cleaned up for session: {session_id}")
+        
         # Chỉ close nếu WebSocket chưa đóng
         try:
             await ws.close()
-            print(" AI WebSocket đóng")
+            print("🔌 AI WebSocket đóng")
         except:
             pass
 
@@ -97,6 +215,42 @@ async def ai_websocket(ws: WebSocket):
 async def health_check():
     """API health kiểm tra endpoint."""
     return {"status": "ok", "service": "AI Emotion Detection"}
+
+@app.get("/api/webcam/download/{session_id}")
+async def download_webcam_recording(session_id: str):
+    """
+    Download webcam recording đã hoàn thành
+    """
+    print(f"📥 Download request for session: {session_id}")
+    
+    if session_id not in webcam_sessions:
+        print(f"❌ Session not found: {session_id}")
+        raise HTTPException(status_code=404, detail="Session không tồn tại")
+    
+    session = webcam_sessions[session_id]
+    video_path = session.get("video_path")
+    
+    if not video_path or not os.path.exists(video_path):
+        print(f"❌ Video file not found: {video_path}")
+        raise HTTPException(status_code=404, detail="Video file không tồn tại")
+    
+    print(f"✅ Sending file: {video_path}")
+    
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        filename=f"webcam_{session_id}.mp4"
+    )
+
+@app.get("/api/webcam/sessions")
+async def list_webcam_sessions():
+    """
+    Liệt kê tất cả webcam recording sessions
+    """
+    return {
+        "sessions": webcam_sessions,
+        "total": len(webcam_sessions)
+    }
 
 # ====== VIDEO PROCESSING ENDPOINTS ======
 

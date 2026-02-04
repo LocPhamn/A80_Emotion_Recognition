@@ -3,13 +3,13 @@ import { useState, useRef, useEffect } from 'react'
 // Helper function: Lấy màu theo emotion
 const getEmotionColor = (emotion) => {
   const colorMap = {
-    'happy': '#4CAF50',      // Xanh lá
-    'sad': '#2196F3',        // Xanh dương
-    'angry': '#F44336',      // Đỏ
-    'surprise': '#FF9800',   // Cam
-    'fear': '#9C27B0',       // Tím
-    'disgust': '#795548',    // Nâu
-    'neutral': '#9E9E9E'     // Xám
+    'bình thường': '#4CAF50',      // Xanh lá
+    'buồn bã': '#2196F3',        // Xanh dương
+    'tức giận': '#F44336',      // Đỏ
+    'bất ngờ': '#FF9800',   // Cam
+    'sợ hãi': '#9C27B0',       // Tím
+    'khó chịu': '#795548',    // Nâu
+    'bình thường': '#9E9E9E'     // Xám
   }
   return colorMap[emotion] || '#00BCD4' // Cyan mặc định
 }
@@ -195,7 +195,7 @@ function WebcamDetection({ onStats }) {
             
             ctx.fillStyle = color
             ctx.fillRect(scaledBbox.x, scaledBbox.y - textHeight - 5, textMetrics.width + 10, textHeight + 5)
-            
+
             // Vẽ text
             ctx.fillStyle = '#ffffff'
             ctx.fillText(text, scaledBbox.x + 5, scaledBbox.y - 8)
@@ -233,7 +233,7 @@ function WebcamDetection({ onStats }) {
   const startSendingFrames = () => {
   let isProcessing = false;
   let lastSendTime = performance.now();
-  const minFrameInterval = 50; // Tối đa 20 FPS (50ms/frame)
+  const minFrameInterval = 33; // Tối đa 30 FPS (33ms/frame)
   
   const sendFrame = () => {
     const now = performance.now();
@@ -250,7 +250,7 @@ function WebcamDetection({ onStats }) {
     lastSendTime = now;
     
     const canvas = document.createElement('canvas');
-    const scale = 1 // nếu muốn giảm độ phân giải gửi lên, thay 1 bằng 0.5 hoặc 0.75
+    const scale = 0.75 // nếu muốn giảm độ phân giải gửi lên, thay 1 bằng 0.5 hoặc 0.75
     sendScaleRef.current = scale // Lưu scale để dùng khi scale tọa độ bbox
     canvas.width = videoRef.current.videoWidth * scale;
     canvas.height = videoRef.current.videoHeight * scale;

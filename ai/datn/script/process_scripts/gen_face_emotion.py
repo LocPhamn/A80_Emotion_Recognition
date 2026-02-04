@@ -7,6 +7,24 @@ import cv2
 import random
 import numpy as np
 
+def CLAHE_enhance(root,emotion):
+    images = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(('.png', '.jpg', '.jpeg'))]
+    out_dir = r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\data\gen_images_clahe\{}".format(emotion)
+    os.makedirs(out_dir, exist_ok=True)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    for img_path in images:
+        base_name = os.path.basename(img_path)
+        store_path = os.path.join(out_dir, base_name)
+        origin_face = cv2.imread(img_path)
+        lab = cv2.cvtColor(origin_face, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l = clahe.apply(l)
+        lab = cv2.merge((l, a, b))
+        face = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        cv2.imwrite(store_path, face)
+
+
 def convert_heic_to_jpg(heic_file_path, jpg_file_path):
     try:
         # Đăng ký heif opener cho PIL
@@ -180,5 +198,7 @@ def generate_rotated_dataset(input_folder, output_folder, rotations_per_image=5)
 
 
 if __name__ == "__main__":
-    generate_rotated_dataset("D:\Python plus\AI_For_CV\script\datn\data\internet_face","D:\Python plus\AI_For_CV\script\datn\data\gen_images_v2", rotations_per_image=10)
-    
+    # generate_rotated_dataset("D:\Python plus\AI_For_CV\script\datn\data\internet_face","D:\Python plus\AI_For_CV\script\datn\data\gen_images_v2", rotations_per_image=10)
+    emotion = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+    for em in emotion:
+        CLAHE_enhance(r"E:\data\train_emotion_Face\{}".format(em),em)

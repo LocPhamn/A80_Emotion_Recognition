@@ -4,7 +4,6 @@ from fastapi.responses import FileResponse
 from starlette.websockets import WebSocketDisconnect
 import cv2
 import numpy as np
-import base64
 import os
 import uuid
 import json
@@ -28,6 +27,10 @@ app.add_middleware(
 # Khởi tạo model
 tracker = FaceEmotionTracker()
 
+# Recording configuration
+RECORDING_FPS = 15.0
+RECORDING_RESOLUTION = (640, 480)
+
 # Setup video directories
 TEMP_DIR = Path("./temp_videos")
 OUTPUT_DIR = Path("./output_videos")
@@ -41,6 +44,14 @@ video_jobs = {}
 
 # Lưu trạng thái webcam recording sessions
 webcam_sessions = {}
+
+def write_frame_to_video(video_writer, frame):
+    """Helper function để ghi frame vào video với resize"""
+    if video_writer and frame is not None:
+        frame_resized = cv2.resize(frame, RECORDING_RESOLUTION)
+        video_writer.write(frame_resized)
+        return True
+    return False
 
 @app.websocket("/ws/process")
 async def ai_websocket(ws: WebSocket):
@@ -77,13 +88,13 @@ async def ai_websocket(ws: WebSocket):
                         video_filename = f"webcam_{session_id}.mp4"
                         video_path = WEBCAM_RECORDINGS_DIR / video_filename
                         
-                        # Sử dụng codec mp4v và FPS thấp hơn
+                        # Sử dụng codec mp4v
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         video_writer = cv2.VideoWriter(
                             str(video_path),
                             fourcc,
-                            15.0,  # 15 FPS cho webcam recording
-                            (640, 480)
+                            RECORDING_FPS,
+                            RECORDING_RESOLUTION
                         )
                         
                         # Lưu session
@@ -146,10 +157,7 @@ async def ai_websocket(ws: WebSocket):
                 if recording and video_writer:
                     np_arr = np.frombuffer(data, np.uint8)
                     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        # Resize frame về 640x480
-                        frame_resized = cv2.resize(frame, (640, 480))
-                        video_writer.write(frame_resized)
+                    if write_frame_to_video(video_writer, frame):
                         frame_count += 1
                 
                 continue
@@ -172,12 +180,7 @@ async def ai_websocket(ws: WebSocket):
             result = tracker.process_frame(frame)
             
             # GHI FRAME VÀO VIDEO nếu đang recording
-            if recording and video_writer:
-                # Lấy processed frame với bbox và emotion
-                processed_frame = result['frame']
-                # Resize về 640x480
-                frame_resized = cv2.resize(processed_frame, (640, 480))
-                video_writer.write(frame_resized)
+            if recording and write_frame_to_video(video_writer, result['frame']):
                 frame_count += 1
             
             # ✅ OPTIMIZATION: Chỉ gửi metadata, không gửi ảnh

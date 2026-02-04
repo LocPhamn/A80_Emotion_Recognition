@@ -181,8 +181,7 @@ class FaceEmotionTracker:
             track_thresh=0.5,
             track_buffer=30,
             match_thresh=0.8,
-            show_trajectory=False,
-            use_grayscale=False
+            show_trajectory=False
     ):
         """Khởi tạo tracker"""
         print(f"Loading YOLO model: {model_path}")
@@ -192,15 +191,13 @@ class FaceEmotionTracker:
             self.model.to('cuda')
             print("đang sử dụng GPU cho YOLO")
 
-        self.input_size = 960
-        self.use_grayscale = use_grayscale
+        self.input_size = 640
 
         print(f"Khởi động Emotion Classifier: {emotion_weights_path}")
-        print(f"🎨 RGB mode: 3 kênh màu")
         self.emotion_classifier = EmotionClassifier(emotion_weights_path)
 
 
-        self.emotion_cache_frames = 5
+        self.emotion_cache_frames = 10  # Cập nhật emotion mỗi 10 frames
         self.frame_count = 0
 
         # Khởi tạo ByteTracker
@@ -213,7 +210,7 @@ class FaceEmotionTracker:
 
         self.track_emotions = {}  # Current emotion display
         self.emotion_history = defaultdict(lambda: [])  # Lịch sử emotions cho smoothing
-        self.emotion_history_size = 10  # Lưu 10 predictions gần nhất
+        self.emotion_history_size = 7  # Lưu 10 predictions gần nhất
         self.track_history = defaultdict(lambda: [])
         self.show_trajectory = show_trajectory
 
@@ -338,8 +335,7 @@ class FaceEmotionTracker:
         yolo_model_path=r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\model_weights\yolo_models\yolov11s_custom.pt",
         emotion_model_path=r"D:\Python plus\AI_For_CV\script\datn-backed\ai\datn\model_weights\mobilenet_models\mobilenetv3_best_weights_only.pth",
         show_preview=False,
-        skip_frames=1,
-        use_grayscale=False
+        skip_frames=1
     ):
         """
         Xử lý video với face tracking và emotion detection
@@ -351,7 +347,6 @@ class FaceEmotionTracker:
             emotion_model_path: Đường dẫn model emotion (optional)
             show_preview: Hiển thị preview trong khi xử lý
             skip_frames: Bỏ qua N frames để tăng tốc (1 = xử lý tất cả)
-            use_grayscale: Sử dụng model grayscale 1 kênh (True) hay RGB 3 kênh (False)
 
         Returns:
             Dict chứa thông tin xử lý
@@ -412,7 +407,6 @@ class FaceEmotionTracker:
             tracker_kwargs['model_path'] = yolo_model_path
         if emotion_model_path:
             tracker_kwargs['emotion_weights_path'] = emotion_model_path
-        tracker_kwargs['use_grayscale'] = use_grayscale
         
         tracker = FaceEmotionTracker(**tracker_kwargs)
         

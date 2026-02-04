@@ -4,6 +4,8 @@ import WebcamDetection from './WebcamDetection.jsx'
 import Statistics from './Statistics.jsx'
 import VideoManagement from './VideoManagement.jsx'
 import './Dashboard.css'
+import logo from '../assets/logo2.png'
+import backgroundImage from '../assets/background1.jpg'
 
 function Dashboard() {
   const [activeTab, setActiveTab] = useState('home')
@@ -134,12 +136,20 @@ function Dashboard() {
   }
 
   return (
-    <div className="dashboard-container">
+    <div className="dashboard-container" style={{
+      backgroundImage: `url(${backgroundImage})`,
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      backgroundRepeat: 'no-repeat'
+    }}>
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h2>🤖 AI Vision</h2>
-          <p>Admin Panel</p>
+          <div className="logo-container">
+            <img src={logo} alt="Logo" className="sidebar-logo" />
+          </div>
+          <h2>A80</h2>
+          <p>Nhận diện cảm xúc AI</p>
         </div>
         
         <nav className="sidebar-nav">

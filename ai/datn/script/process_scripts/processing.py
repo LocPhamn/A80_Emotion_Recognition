@@ -17,11 +17,11 @@ from sklearn.cluster import DBSCAN
 def convert_bbox_to_yolo(bbox, img_width, img_height):
     x1, y1, x2, y2 = bbox
     
-    # Calculate center coordinates
+    # tính toán tọa độ trung tâm
     x_center = (x1 + x2) / 2.0
     y_center = (y1 + y2) / 2.0
     
-    # Calculate width and height
+    # tính chiều ngang chiều cao
     width = x2 - x1
     height = y2 - y1
     
@@ -74,6 +74,47 @@ def save_frame():
             cv2.imwrite(os.path.join(image_folder, frame_name), frame)
             frame_id += 1
         print(f"Extracted total {frame_id} frames from {video_path}")
+
+def face_box_labeled(root,confidence_threshold = 0.9):
+    image_paths = [os.path.join(root,path) for path in os.listdir(root)]
+    out_path = "box_labeled"
+
+    os.makedirs(out_path,exist_ok= False)
+    os.makedirs(os.path.join(out_path,"images"),exist_ok= False)
+    os.makedirs(os.path.join(out_path,"labels"),exist_ok= False)
+
+    for image_path in image_paths:
+        image_name = os.path.basename(image_path)
+        out_image_path = os.path.join(out_path,"images",image_name)
+        out_label_path = os.path.join(out_path, "path", image_name.replace('.jpg','.txt'))
+
+        image = cv2.imread(image_path)
+        h,w = image.shape
+        if image is None:
+            print(f"\nKhông thể đọc ảnh: {img_path}")
+            continue
+        shutil.copy(image_path,out_image_path)
+
+        try:
+            faces = DeepFace.extract_faces(
+                img_path=image,
+                detector_backend='retinaface',
+                enforce_detection=False,
+                align=False
+            )
+        except:
+            faces = DeepFace.extract_faces(
+                img_path=image,
+                detector_backend='mtcnn',
+                enforce_detection=False,
+                align=False
+            )
+        save_yolo_annotation(faces,w,h,out_label_path)
+
+
+
+
+
 
 def visualize_annotations():
     """ Hiển thị ảnh với bounding box từ file label YOLO """
@@ -163,14 +204,13 @@ def size_processing(root, out_folder):
 
     print("Hoàn tất xử lý và lưu ảnh!")
 
-def label_emotions():
+def label_emotions(root):
     """
     Đi qua từng ảnh, phân tích cảm xúc bằng DeepFace,
     và lưu lại với tên file là emotion_index.jpg
     """
-    root = r"D:\Python plus\AI_For_CV\script\datn\data\test_faces"
     emotions = ['happy', 'angry', 'fear','surprise', 'sad', 'disgust','neutral']
-    train_folder = r'D:\Python plus\AI_For_CV\script\datn\dataset\test'
+    train_folder = r'D:\Python plus\AI_For_CV\script\datn\dataset\train'
     shutil.rmtree(train_folder)
     os.makedirs(train_folder, exist_ok=True)
 
@@ -179,10 +219,6 @@ def label_emotions():
 
     # Lấy danh sách ảnh đã xử lý
     image_files = [f for f in os.listdir(root) if f.endswith(('.jpg', '.png', '.jpeg'))]
-
-    print(f"Tìm thấy {len(image_files)} ảnh để phân tích...")
-
-
     for idx, img_name in enumerate(tqdm(image_files, desc="Analyzing emotions")):
         img_path = os.path.join(root, img_name)
         base_name = os.path.basename(img_name).split('.')[0]
@@ -237,7 +273,7 @@ def detect_and_crop_faces_deepface(root, face_dir, confidence_threshold=0.8):
     total_faces = 0
     failed_images = 0
     sample = random.sample(image_paths, len(image_paths))
-    for img_path in tqdm(sample, desc="Detecting and cropping faces"):
+    for img_path in tqdm(sample, desc="nhận diện và crop khuôn mặt"):
         try:
             # Đọc ảnh trước
             image = cv2.imread(img_path)
@@ -245,17 +281,15 @@ def detect_and_crop_faces_deepface(root, face_dir, confidence_threshold=0.8):
                 print(f"\nKhông thể đọc ảnh: {img_path}")
                 failed_images += 1
                 continue
-            
-            # Phát hiện khuôn mặt bằng DeepFace với backend opencv (ổn định hơn)
+
             try:
                 faces = DeepFace.extract_faces(
-                    img_path=image,  # Truyền numpy array thay vì path
-                    detector_backend='opencv',  # Dùng opencv thay vì retinaface
+                    img_path=image,
+                    detector_backend='retinaface',
                     enforce_detection=False,
                     align=False
                 )
             except:
-                # Thử backend khác nếu opencv fail
                 faces = DeepFace.extract_faces(
                     img_path=image,
                     detector_backend='mtcnn',
@@ -282,12 +316,12 @@ def detect_and_crop_faces_deepface(root, face_dir, confidence_threshold=0.8):
                     # Kiểm tra kích thước hợp lệ
                     if face_img.size == 0 or face_img.shape[0] < 10 or face_img.shape[1] < 10:
                         continue
-                    
+                    resize_image = resize_face(face_img)[0] * 255
                     # Lưu ảnh
                     base_name = os.path.splitext(os.path.basename(img_path))[0]
                     save_name = f"{base_name}_face{idx}.jpg"
                     save_path = os.path.join(face_dir, save_name)
-                    cv2.imwrite(save_path, face_img)
+                    cv2.imwrite(save_path, resize_image)
                     face_count += 1
                     
         except Exception as e:

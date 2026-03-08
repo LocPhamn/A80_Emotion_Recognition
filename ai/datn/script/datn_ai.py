@@ -11,6 +11,7 @@ import argparse
 from torchvision import transforms, models
 from PIL import Image
 from pathlib import Path
+import unicodedata
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 from ai.datn.objects import EmotionClassifier
@@ -20,6 +21,53 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ByteTrack'))
 
 from yolox.tracker.byte_tracker import BYTETracker
 from yolox.tracking_utils.timer import Timer
+
+
+def remove_vietnamese_accents(text):
+    """
+    Convert tiếng Việt có dấu → không dấu để OpenCV hiển thị được
+    
+    Args:
+        text: String tiếng Việt có dấu
+    
+    Returns:
+        String không dấu
+    """
+    # Mapping đặc biệt cho các ký tự tiếng Việt
+    vietnamese_map = {
+        'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
+        'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
+        'â': 'a', 'ầ': 'a', 'ấ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
+        'è': 'e', 'é': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
+        'ê': 'e', 'ề': 'e', 'ế': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
+        'ì': 'i', 'í': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
+        'ò': 'o', 'ó': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
+        'ô': 'o', 'ồ': 'o', 'ố': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
+        'ơ': 'o', 'ờ': 'o', 'ớ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
+        'ù': 'u', 'ú': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
+        'ư': 'u', 'ừ': 'u', 'ứ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
+        'ỳ': 'y', 'ý': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y',
+        'đ': 'd',
+        'À': 'A', 'Á': 'A', 'Ả': 'A', 'Ã': 'A', 'Ạ': 'A',
+        'Ă': 'A', 'Ằ': 'A', 'Ắ': 'A', 'Ẳ': 'A', 'Ẵ': 'A', 'Ặ': 'A',
+        'Â': 'A', 'Ầ': 'A', 'Ấ': 'A', 'Ẩ': 'A', 'Ẫ': 'A', 'Ậ': 'A',
+        'È': 'E', 'É': 'E', 'Ẻ': 'E', 'Ẽ': 'E', 'Ẹ': 'E',
+        'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E', 'Ễ': 'E', 'Ệ': 'E',
+        'Ì': 'I', 'Í': 'I', 'Ỉ': 'I', 'Ĩ': 'I', 'Ị': 'I',
+        'Ò': 'O', 'Ó': 'O', 'Ỏ': 'O', 'Õ': 'O', 'Ọ': 'O',
+        'Ô': 'O', 'Ồ': 'O', 'Ố': 'O', 'Ổ': 'O', 'Ỗ': 'O', 'Ộ': 'O',
+        'Ơ': 'O', 'Ờ': 'O', 'Ớ': 'O', 'Ở': 'O', 'Ỡ': 'O', 'Ợ': 'O',
+        'Ù': 'U', 'Ú': 'U', 'Ủ': 'U', 'Ũ': 'U', 'Ụ': 'U',
+        'Ư': 'U', 'Ừ': 'U', 'Ứ': 'U', 'Ử': 'U', 'Ữ': 'U', 'Ự': 'U',
+        'Ỳ': 'Y', 'Ý': 'Y', 'Ỷ': 'Y', 'Ỹ': 'Y', 'Ỵ': 'Y',
+        'Đ': 'D'
+    }
+    
+    result = ''
+    for char in text:
+        result += vietnamese_map.get(char, char)
+    
+    return result
 
 # ====== HỖ TRỢ CHO BYTETRACKER ======
 class Args:
@@ -58,17 +106,32 @@ def get_color(idx):
 
 
 def get_emotion_color(emotion):
-    """Trả về màu sắc cho từng cảm xúc"""
-    emotion_colors = {
-        'angry': (0, 0, 255),  # Đỏ
-        'disgust': (0, 128, 0),  # Xanh lá đậm
-        'fear': (128, 0, 128),  # Tím
-        'happy': (0, 255, 255),  # Vàng
-        'neutral': (200, 200, 200),  # Xám
-        'sad': (255, 0, 0),  # Xanh dương
-        'surprise': (255, 165, 0)  # Cam
+    """Trả về màu sắc cho từng cảm xúc (hỗ trợ cả tiếng Việt và tiếng Anh)"""
+    # Mapping tiếng Việt sang tiếng Anh
+    vi_to_en = {
+        'tức giận': 'angry',
+        'khó chịu': 'disgust',
+        'sợ hãi': 'fear',
+        'hạnh phúc': 'happy',
+        'trung tính': 'neutral',
+        'buồn bã': 'sad',
+        'bất ngờ': 'surprise'
     }
-    return emotion_colors.get(emotion, (255, 255, 255))
+    
+    # Convert sang tiếng Anh nếu là tiếng Việt
+    emotion_en = vi_to_en.get(emotion, emotion)
+    
+    # Màu sắc BGR cho OpenCV (rực rỡ hơn để dễ nhìn)
+    emotion_colors = {
+        'angry': (0, 0, 255),        # Đỏ tươi
+        'disgust': (255, 0, 255),    # Magenta/Tím hồng
+        'fear': (128, 0, 128),       # Tím đậm
+        'happy': (0, 255, 0),        # Xanh lá tươi
+        'neutral': (180, 180, 180),  # Xám nhạt
+        'sad': (255, 100, 0),        # Xanh dương
+        'surprise': (0, 255, 255)    # Vàng tươi (cyan)
+    }
+    return emotion_colors.get(emotion_en, (255, 255, 255))
 
 
 def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, track_emotions, fps=0, predict_emotion=True, get_stable_emotion_func=None):
@@ -142,7 +205,7 @@ def visualize_tracking_with_emotion(frame, online_targets, emotion_classifier, t
 
         # Vẽ labels
         id_label = f"ID:{track_id}"
-        emotion_label = f"{emotion}"
+        emotion_label = remove_vietnamese_accents(emotion)
         conf_label = f"{emotion_conf:.2f}"
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -194,9 +257,23 @@ class FaceEmotionTracker:
         self.input_size = 640
 
         print(f"Khởi động Emotion Classifier: {emotion_weights_path}")
-        self.emotion_classifier = EmotionClassifier(emotion_weights_path)
+        # Emotion labels tiếng Việt: ['tức giận', 'khó chịu', 'sợ hãi', 'hạnh phúc', 'trung tính', 'buồn bã', 'bất ngờ']
 
+        self.penalties = [1.0, 1.0, 1.0, 1.0, 0.01, 1.0, 2.0]
 
+        self.emotion_classifier = EmotionClassifier(emotion_weights_path, emotion_penalties=self.penalties)
+        
+        # Mapping tiếng Việt sang tiếng Anh (cho database)
+        self.emotion_to_english = {
+            'tức giận': 'angry',
+            'khó chịu': 'disgust',
+            'sợ hãi': 'fear',
+            'hạnh phúc': 'happy',
+            'trung tính': 'neutral',
+            'buồn bã': 'sad',
+            'bất ngờ': 'surprise'
+        }
+        
         self.emotion_cache_frames = 10  # Cập nhật emotion mỗi 10 frames
         self.frame_count = 0
 
@@ -351,19 +428,10 @@ class FaceEmotionTracker:
         Returns:
             Dict chứa thông tin xử lý
         """
-        # Track unique visitor IDs
+        # Track unique visitor IDs và emotion của họ
         visited_ids = set()  # Lưu các track ID duy nhất
-        emotion_count_per_id = defaultdict(lambda: defaultdict(int))  # Đếm số lần mỗi emotion xuất hiện cho mỗi ID
-
-        emotion_visitors = {
-            '0': 0,  # angry
-            '1': 0,  # disgust
-            '2': 0,  # fear
-            '3': 0,  # happy
-            '4': 0,  # neutral
-            '5': 0,  # sad
-            '6': 0   # surprise
-        }
+        track_final_emotion = {}  # Lưu emotion CUỐI CÙNG cho mỗi ID (đơn giản nhất)
+        
         # Kiểm tra file input
         if not os.path.exists(input_video_path):
             raise FileNotFoundError(f"Video không tồn tại: {input_video_path}")
@@ -443,17 +511,23 @@ class FaceEmotionTracker:
                 result = tracker.process_frame(frame)
                 processed_frame = result['frame']
                 
-                # Đếm unique visitors và emotions
+                # Đếm unique visitors và lưu emotion cuối cùng của họ
                 for track in result['tracks']:
                     track_id = track['id']
-                    emotion = track['emotion']
+                    emotion_vi = track['emotion']  # Emotion tiếng Việt từ model
                     
                     # Thêm ID vào set unique visitors
                     visited_ids.add(track_id)
                     
-                    # Đếm số lần xuất hiện của mỗi emotion cho ID này
-                    if emotion in ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']:
-                        emotion_count_per_id[track_id][emotion] += 1
+                    # Convert emotion sang tiếng Anh để lưu vào database
+                    emotion_en = tracker.emotion_to_english.get(emotion_vi, 'neutral')
+                    
+                    # Debug: In ra để kiểm tra (chỉ frame đầu tiên)
+                    if frame_idx == 1 and track_id not in track_final_emotion:
+                        print(f"[DEBUG] Track {track_id}: {emotion_vi} → {emotion_en}")
+                    
+                    # Lưu emotion CUỐI CÙNG cho ID này (ghi đè)
+                    track_final_emotion[track_id] = emotion_en
                 
                 # Ghi frame đã xử lý
                 out.write(processed_frame)
@@ -491,39 +565,76 @@ class FaceEmotionTracker:
         # Tính tổng khách duy nhất
         total_visitor = len(visited_ids)
         
-        # Xác định emotion chi phối cho mỗi visitor (emotion xuất hiện nhiều nhất)
-        emotion_map = {
-            'angry': '0',
-            'disgust': '1',
-            'fear': '2',
-            'happy': '3',
-            'neutral': '4',
-            'sad': '5',
-            'surprise': '6'
-        }
+        # Đếm số người cho mỗi emotion - LOGIC ĐƠN GIẢN
+        emotion_visitors = defaultdict(int)
+        
+        print(f"\n🔍 DEBUG - Processing {total_visitor} visitors...")
         
         for track_id in visited_ids:
-            if track_id in emotion_count_per_id:
-                # Lấy emotion xuất hiện nhiều nhất cho ID này
-                emotions = emotion_count_per_id[track_id]
-                if emotions:
-                    dominant_emotion = max(emotions, key=emotions.get)
-                    emotion_key = emotion_map[dominant_emotion]
-                    emotion_visitors[emotion_key] += 1
+            if track_id in track_final_emotion:
+                emotion = track_final_emotion[track_id]
+                emotion_visitors[emotion] += 1  # Mỗi người đếm 1 lần duy nhất
+                
+                # Debug: in ra 5 người đầu tiên
+                if len(emotion_visitors) <= 5:
+                    print(f"   Track {track_id}: {emotion}")
+            else:
+                # Nếu không có emotion (không nên xảy ra), gán neutral
+                print(f"⚠️ WARNING: Track {track_id} không có emotion, gán 'neutral'")
+                emotion_visitors['neutral'] += 1
         
-        # lấy tỉ lệ cảm xúc
+        # Validation: kiểm tra tổng phải bằng số người
+        total_counted = sum(emotion_visitors.values())
+        if total_counted != total_visitor:
+            print(f"⚠️ WARNING: Tổng emotion count ({total_counted}) ≠ total visitors ({total_visitor})!")
+        
+        # Tính tỉ lệ cảm xúc (tính theo phần trăm %)
         emotion_ratios = {}
-        for key, count in emotion_visitors.items():
-            ratio = (count / total_visitor) if total_visitor > 0 else 0
-            emotion_ratios[key] = {
-                'ratio': ratio
+        for emotion_name in ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']:
+            count = emotion_visitors.get(emotion_name, 0)
+            ratio = (count / total_visitor * 100) if total_visitor > 0 else 0.0
+            emotion_ratios[emotion_name] = {
+                'ratio': round(ratio, 2),
+                'count': count
             }
         
         
         # Tổng kết
-        print(f"\nHoàn thành!")
+        print(f"\n✅ Hoàn thành!")
         print(f"Đã xử lý: {processed_frames}/{total_frames} frames")
         print(f"Video đã lưu tại: {output_video_path}")
+        print(f"\n📊 THỐNG KÊ:")
+        print(f"   Tổng số người: {total_visitor}")
+        
+        # Debug: hiển thị raw data
+        print(f"\n🔍 DEBUG - Emotion count:")
+        for emotion_en, count in sorted(emotion_visitors.items()):
+            print(f"   {emotion_en}: {count} người")
+        
+        print(f"\n📊 Tỉ lệ cảm xúc (%):")
+        
+        # Mapping hiển thị tiếng Việt cho người dùng
+        emotion_en_to_vi = {
+            'angry': 'Tức giận',
+            'disgust': 'Khó chịu',
+            'fear': 'Sợ hãi',
+            'happy': 'Hạnh phúc',
+            'neutral': 'Trung tính',
+            'sad': 'Buồn bã',
+            'surprise': 'Bất ngờ'
+        }
+        
+        total_percentage = 0.0
+        for emotion_en, data in sorted(emotion_ratios.items()):
+            emotion_vi = emotion_en_to_vi.get(emotion_en, emotion_en)
+            print(f"   - {emotion_vi:15s}: {data['ratio']:6.2f}% ({data['count']} người)")
+            total_percentage += data['ratio']
+        
+        print(f"   ✓ Tổng: {round(total_percentage, 2)}% (phải = 100%)")
+        
+        # Validation: Kiểm tra tổng phần trăm phải gần bằng 100%
+        if abs(total_percentage - 100.0) > 0.1:
+            print(f"⚠️ WARNING: Tổng phần trăm không đúng ({total_percentage}%)! Có thể có lỗi logic.")
         
         return {
             'total_visitor': total_visitor,

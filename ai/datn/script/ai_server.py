@@ -12,6 +12,7 @@ from datetime import datetime
 from fastapi import UploadFile, File, BackgroundTasks
 from typing import Optional
 import traceback
+import torch  # For GPU memory cleanup
 from datn_ai import FaceEmotionTracker
 import datn_ai  # Import module để dùng process_video function
 
@@ -30,6 +31,9 @@ tracker = FaceEmotionTracker()
 # Recording configuration
 RECORDING_FPS = 15.0
 RECORDING_RESOLUTION = (640, 480)
+
+# Performance optimization
+FRAME_SKIP_THRESHOLD = 3  # Skip frame nếu đang xử lý quá 3 lần liên tiếp
 
 # Setup video directories
 TEMP_DIR = Path("./temp_videos")
@@ -56,7 +60,12 @@ def write_frame_to_video(video_writer, frame):
 @app.websocket("/ws/process")
 async def ai_websocket(ws: WebSocket):
     await ws.accept()
-    print("✅ AI WebSocket connected!")
+    connection_id = str(uuid.uuid4())[:8]
+    print(f"✅ AI WebSocket connected! [ID: {connection_id}]")
+    
+    # CRITICAL: Reset tracker state khi có connection mới
+    tracker.reset()
+    print(f"🔄 Tracker state reset for connection [{connection_id}]")
     
     is_processing = False  
     frame_skip_count = 0
@@ -149,7 +158,7 @@ async def ai_websocket(ws: WebSocket):
                 
             data = message["bytes"]
             
-            # SKIP FRAME nếu đang xử lý
+            # AGGRESSIVE SKIP nếu đang xử lý
             if is_processing:
                 frame_skip_count += 1
                 
@@ -163,8 +172,8 @@ async def ai_websocket(ws: WebSocket):
                 continue
             
             # LOG CẢNH BÁO nếu skip quá nhiều frame
-            if frame_skip_count > 5:
-                print(f"⚠️ Bỏ qua {frame_skip_count} frames do xử lý chậm")
+            if frame_skip_count > FRAME_SKIP_THRESHOLD:
+                print(f"⚠️ Bỏ qua {frame_skip_count} frames (xử lý chậm)")
             frame_skip_count = 0
                 
             is_processing = True
@@ -194,9 +203,9 @@ async def ai_websocket(ws: WebSocket):
             is_processing = False
     
     except WebSocketDisconnect:
-        print("⚠️ Client không còn kết nối, đóng WebSocket")
+        print(f"⚠️ Client disconnected [{connection_id}]")
     except Exception as e:
-        print(f"❌ AI Websocket gặp lỗi: {e}")
+        print(f"❌ AI Websocket error [{connection_id}]: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -207,10 +216,19 @@ async def ai_websocket(ws: WebSocket):
                 webcam_sessions[session_id]["status"] = "interrupted"
             print(f"🧹 Video writer cleaned up for session: {session_id}")
         
+        # CRITICAL: Reset tracker để giải phóng memory
+        tracker.reset()
+        print(f"🔄 Tracker reset after disconnect [{connection_id}]")
+        
+        # Clear GPU cache nếu có
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"🧹 GPU cache cleared [{connection_id}]")
+        
         # Chỉ close nếu WebSocket chưa đóng
         try:
             await ws.close()
-            print("🔌 AI WebSocket đóng")
+            print(f"🔌 AI WebSocket closed [{connection_id}]")
         except:
             pass
 

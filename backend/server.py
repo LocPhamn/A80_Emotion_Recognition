@@ -102,6 +102,49 @@ video_processing_jobs = {}
 recording_sessions = {}
 
 
+def create_video_from_jpeg_frames(jpeg_frames: list, output_path: str, fps: float, resolution: tuple):
+    """
+    Tạo video MP4 từ list các JPEG frames (chạy trong background thread)
+    
+    Args:
+        jpeg_frames: List of JPEG bytes
+        output_path: Output video path
+        fps: Frame rate
+        resolution: (width, height)
+    """
+    try:
+        width, height = resolution
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        if not video_writer.isOpened():
+            raise Exception(f"Cannot create video writer: {output_path}")
+        
+        logger.info(f"🎬 Writing {len(jpeg_frames)} frames to {output_path}...")
+        
+        for i, jpeg_bytes in enumerate(jpeg_frames):
+            # Decode JPEG to frame
+            nparr = np.frombuffer(jpeg_bytes, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is not None:
+                # Resize nếu cần (đảm bảo đúng resolution)
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, (width, height))
+                
+                video_writer.write(frame)
+            
+            if (i + 1) % 100 == 0:
+                logger.info(f"  Progress: {i + 1}/{len(jpeg_frames)} frames")
+        
+        video_writer.release()
+        logger.info(f"✅ Video created successfully: {output_path}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating video from JPEG frames: {e}")
+        raise
+
+
 def convert_to_web_compatible(input_path: Path, output_path: Path) -> bool:
     """Convert video to H.264 + AAC for web browser compatibility"""
     try:
@@ -238,13 +281,14 @@ async def process_webcam_with_recording(websocket: WebSocket):
     session_id = str(uuid.uuid4())
     recording_sessions[session_id] = {
         "is_recording": False,
-        "video_writer": None,
+        "jpeg_frames": [],  # Lưu raw JPEG bytes
         "raw_video_path": None,
         "start_time": None,
         "frame_count": 0,
         "fps": 15,
         "width": None,
-        "height": None
+        "height": None,
+        "first_frame_decoded": False  # Flag để decode frame đầu lấy resolution
     }
     
     ai_ws = None
@@ -301,33 +345,25 @@ async def process_webcam_with_recording(websocket: WebSocket):
                             # Gửi frame đến AI server để xử lý real-time
                             await ai_ws.send(frame_bytes)
                             
-                            # Nếu đang recording, ghi frame vào video raw
+                            # ✅ Nếu đang recording, lưu raw JPEG bytes (KHÔNG DECODE!)
                             if session['is_recording']:
-                                nparr = np.frombuffer(frame_bytes, np.uint8)
-                                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                
-                                if frame is not None:
-                                    # Initialize video writer nếu chưa có
-                                    if session['video_writer'] is None:
+                                # Decode frame đầu tiên để lấy resolution
+                                if not session['first_frame_decoded']:
+                                    nparr = np.frombuffer(frame_bytes, np.uint8)
+                                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                    if frame is not None:
                                         height, width = frame.shape[:2]
                                         session['width'] = width
                                         session['height'] = height
-                                        
-                                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                                        session['video_writer'] = cv2.VideoWriter(
-                                            str(session['raw_video_path']),
-                                            fourcc,
-                                            15.0,  # 15 FPS
-                                            (width, height)
-                                        )
-                                        logger.info(f"📹 Video writer initialized: {width}x{height} @ 15 FPS")
-                                    
-                                    # Ghi frame vào video
-                                    if session['video_writer']:
-                                        session['video_writer'].write(frame)
-                                        session['frame_count'] += 1
-                                        if session['frame_count'] % 50 == 0:
-                                            logger.info(f"📹 Recorded {session['frame_count']} frames")
+                                        session['first_frame_decoded'] = True
+                                        logger.info(f"📹 Recording initialized: {width}x{height}")
+                                
+                                # Lưu raw JPEG bytes (NHANH - không decode/encode)
+                                session['jpeg_frames'].append(frame_bytes)
+                                session['frame_count'] += 1
+                                
+                                if session['frame_count'] % 50 == 0:
+                                    logger.info(f"📹 Recorded {session['frame_count']} frames ({len(session['jpeg_frames']) * len(frame_bytes) // 1024 // 1024} MB)")
                             
                     except WebSocketDisconnect:
                         logger.info("🔴 Client disconnected")
@@ -372,7 +408,11 @@ async def process_webcam_with_recording(websocket: WebSocket):
     finally:
         # Cleanup
         if recording_sessions[session_id]['is_recording']:
-            await finalize_recording(session_id, websocket)
+            logger.warning("⚠️ Connection closed while recording, finalizing...")
+            try:
+                await finalize_recording(session_id, websocket)
+            except Exception as cleanup_err:
+                logger.error(f"Error during cleanup finalize: {cleanup_err}")
         
         if ai_ws:
             await ai_ws.close()
@@ -395,21 +435,41 @@ async def safe_send_websocket(websocket: WebSocket, message: dict):
         logger.warning(f"⚠️ Failed to send WebSocket message: {e}")
 
 async def finalize_recording(session_id: str, websocket: WebSocket):
-    """Hoàn tất recording, gọi AI server để xử lý video, và lưu vào database"""
+    """Hoàn tất recording, tạo video từ JPEG frames, gọi AI server xử lý"""
     session = recording_sessions[session_id]
     
     try:
-        logger.info(f"⏹️ Stopping recording: {session.get('raw_video_path')}")
+        logger.info(f"⏹️ Stopping recording: {session['frame_count']} frames collected")
         
-        # Đóng video writer
-        if session['video_writer']:
-            session['video_writer'].release()
-            session['video_writer'] = None
-            logger.info("✅ Video writer closed")
+        # Tạo video từ JPEG frames trong background thread
+        if not session['jpeg_frames']:
+            raise Exception("No frames recorded")
         
-        raw_video_path = session.get('raw_video_path')
-        if not raw_video_path or not raw_video_path.exists():
-            raise Exception("Raw video file not found")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        raw_filename = f"webcam_raw_{timestamp}.mp4"
+        raw_video_path = VIDEO_STORAGE_DIR / raw_filename
+        session['raw_video_path'] = raw_video_path
+        
+        # ✅ Tạo video từ JPEG frames trong thread pool (NON-BLOCKING)
+        logger.info(f"🎬 Creating video from {len(session['jpeg_frames'])} JPEG frames...")
+        
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,  # Default thread pool
+            create_video_from_jpeg_frames,
+            session['jpeg_frames'],
+            str(raw_video_path),
+            session['fps'],
+            (session['width'], session['height'])
+        )
+        
+        logger.info(f"✅ Video created: {raw_video_path.name}")
+        
+        # Clear JPEG frames để giải phóng memory
+        session['jpeg_frames'].clear()
+        
+        if not raw_video_path.exists():
+            raise Exception("Failed to create video file")
         
         logger.info(f"📤 Uploading video to AI Server for processing...")
         
@@ -476,7 +536,9 @@ async def finalize_recording(session_id: str, websocket: WebSocket):
         total_visitor = ai_result.get('total_visitor', 0)
         emotion_ratios = ai_result.get('emotion_ratios', {})
         
-        logger.info(f"📊 Statistics from AI: visitors={total_visitor}, emotions={emotion_ratios}")
+        logger.info(f"📊 Statistics from AI: visitors={total_visitor}")
+        logger.info(f"📊 Emotion ratios format: {emotion_ratios}")
+        logger.info(f"📊 Emotion ratios type: {type(emotion_ratios)}")
         
         # Download processed video từ AI server
         processed_video_path = VIDEO_STORAGE_DIR / f"webcam_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
@@ -546,24 +608,50 @@ async def finalize_recording(session_id: str, websocket: WebSocket):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             
+            # Extract ratio values from emotion_ratios
+            # AI server trả về format: {'angry': {'ratio': 15.5, 'count': 10}} hoặc {'angry': 15.5}
+            logger.info(f"🔍 DEBUG - emotion_ratios content: {emotion_ratios}")
+            logger.info(f"🔍 DEBUG - angry value: {emotion_ratios.get('angry')}")
+            logger.info(f"🔍 DEBUG - happy value: {emotion_ratios.get('happy')}")
+            
+            def get_emotion_ratio(emotion_name):
+                value = emotion_ratios.get(emotion_name, 0)
+                logger.info(f"🔍 get_emotion_ratio('{emotion_name}'): value={value}, type={type(value)}")
+                # Nếu value là dict, lấy 'ratio' key
+                if isinstance(value, dict):
+                    ratio = value.get('ratio', 0)
+                    logger.info(f"   → extracted ratio: {ratio}")
+                    return ratio
+                # Nếu value là số, return trực tiếp
+                result_val = value if isinstance(value, (int, float)) else 0
+                logger.info(f"   → direct value: {result_val}")
+                return result_val
+            
             stat_values = (
                 video_id,
                 total_visitor,
-                emotion_ratios.get('angry', 0),
-                emotion_ratios.get('disgust', 0),
-                emotion_ratios.get('fear', 0),
-                emotion_ratios.get('happy', 0),
-                emotion_ratios.get('neutral', 0),
-                emotion_ratios.get('sad', 0),
-                emotion_ratios.get('surprise', 0)
+                get_emotion_ratio('angry'),
+                get_emotion_ratio('disgust'),
+                get_emotion_ratio('fear'),
+                get_emotion_ratio('happy'),
+                get_emotion_ratio('neutral'),
+                get_emotion_ratio('sad'),
+                get_emotion_ratio('surprise')
             )
             
-            logger.info(f"📊 Inserting statistics: {stat_values}")
+            logger.info(f"📊 Inserting statistics: video_id={video_id}, visitors={total_visitor}")
+            logger.info(f"📊 Emotion rates to insert: angry={stat_values[2]}%, disgust={stat_values[3]}%, fear={stat_values[4]}%, happy={stat_values[5]}%, neutral={stat_values[6]}%, sad={stat_values[7]}%, surprise={stat_values[8]}%")
+            
+            # Validation: Kiểm tra tổng phần trăm
+            total_percentage = sum(stat_values[2:9])
+            logger.info(f"📊 Total emotion percentage: {total_percentage}% (should be ~100%)")
+            if abs(total_percentage - 100.0) > 0.5:
+                logger.warning(f"⚠️ VALIDATION WARNING: Total emotion percentage is {total_percentage}%, not 100%!")
             
             cursor.execute(stat_query, stat_values)
             connection.commit()
             
-            logger.info(f"✅ Statistics saved for video {video_id}: visitors={total_visitor}, emotions={emotion_ratios}")
+            logger.info(f"✅ Statistics saved for video {video_id}: visitors={total_visitor}")
             
             # Gửi thông báo hoàn tất về client (nếu connection còn mở)
             await safe_send_websocket(websocket, {
@@ -805,16 +893,22 @@ async def save_webcam_recording(
             # Tạo statistic record
             emotion_ratios = stats.get('emotion_ratios', {})
             
-            # Map emotion names to indices
-            emotion_map = {
-                'angry': '0',
-                'disgust': '1',
-                'fear': '2',
-                'happy': '3',
-                'neutral': '4',
-                'sad': '5',
-                'surprise': '6'
-            }
+            # 🔍 DEBUG logging
+            logger.info(f"🔍 DEBUG - emotion_ratios content: {emotion_ratios}")
+            logger.info(f"🔍 DEBUG - angry value: {emotion_ratios.get('angry')}")
+            
+            # Helper function để lấy ratio an toàn
+            def get_emotion_ratio(emotion_name):
+                """Lấy ratio từ emotion_ratios, hỗ trợ cả format dict và số"""
+                value = emotion_ratios.get(emotion_name, 0)
+                logger.info(f"🔍 get_emotion_ratio('{emotion_name}'): value={value}, type={type(value)}")
+                if isinstance(value, dict):
+                    ratio = value.get('ratio', 0)
+                    logger.info(f"   → extracted ratio: {ratio}")
+                    return ratio
+                result_val = value if isinstance(value, (int, float)) else 0
+                logger.info(f"   → direct value: {result_val}")
+                return result_val
             
             stat_query = """
                 INSERT INTO statistic 
@@ -822,17 +916,23 @@ async def save_webcam_recording(
                  happy_rate, neutral_rate, sad_rate, surprise_rate)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(stat_query, (
+            
+            stat_values = (
                 video_id,
                 stats.get('total_visitor', 0),
-                emotion_ratios.get('angry', {}).get('ratio', 0),
-                emotion_ratios.get('disgust', {}).get('ratio', 0),
-                emotion_ratios.get('fear', {}).get('ratio', 0),
-                emotion_ratios.get('happy', {}).get('ratio', 0),
-                emotion_ratios.get('neutral', {}).get('ratio', 0),
-                emotion_ratios.get('sad', {}).get('ratio', 0),
-                emotion_ratios.get('surprise', {}).get('ratio', 0)
-            ))
+                get_emotion_ratio('angry'),
+                get_emotion_ratio('disgust'),
+                get_emotion_ratio('fear'),
+                get_emotion_ratio('happy'),
+                get_emotion_ratio('neutral'),
+                get_emotion_ratio('sad'),
+                get_emotion_ratio('surprise')
+            )
+            
+            logger.info(f"📊 Saving statistics for video {video_id}: total_visitor={stats.get('total_visitor', 0)}")
+            logger.info(f"📊 Emotion rates: {stat_values[2:9]}")
+            
+            cursor.execute(stat_query, stat_values)
             connection.commit()
             
             logger.info(f"✅ Statistic record created for video {video_id}")
@@ -1023,31 +1123,57 @@ def calculate_statistics_from_log(emotion_data: list, duration: int) -> dict:
         }
     """
     
-    # Count unique track IDs
-    unique_tracks = set()
-    emotion_counts = defaultdict(int)
+    # Mapping tiếng Việt sang tiếng Anh (nếu frontend gửi tiếng Việt)
+    emotion_vi_to_en = {
+        'tức giận': 'angry',
+        'khó chịu': 'disgust',
+        'sợ hãi': 'fear',
+        'hạnh phúc': 'happy',
+        'trung tính': 'neutral',
+        'buồn bã': 'sad',
+        'bất ngờ': 'surprise'
+    }
+    
+    # Đếm emotion cho từng track_id (người)
+    track_emotions = defaultdict(lambda: defaultdict(int))
     
     for entry in emotion_data:
         track_id = entry.get('track_id')
-        emotion = entry.get('emotion', 'neutral')
+        emotion_raw = entry.get('emotion', 'neutral')
+        
+        # Convert sang tiếng Anh nếu là tiếng Việt
+        emotion = emotion_vi_to_en.get(emotion_raw, emotion_raw.lower())
         
         if track_id is not None:
-            unique_tracks.add(track_id)
-        
-        # Count emotions
-        emotion_counts[emotion.lower()] += 1
+            track_emotions[track_id][emotion] += 1
     
-    total_visitor = len(unique_tracks)
-    total_emotions = sum(emotion_counts.values())
+    total_visitor = len(track_emotions)
     
-    # Calculate emotion rates (%)
+    # Xác định dominant emotion cho từng người và đếm
+    emotion_visitor_counts = defaultdict(int)
+    
+    for track_id, emotions in track_emotions.items():
+        if emotions:
+            # Lấy emotion xuất hiện nhiều nhất cho người này
+            dominant_emotion = max(emotions, key=emotions.get)
+            emotion_visitor_counts[dominant_emotion] += 1
+    
+    # Calculate emotion rates (%) dựa trên số người
     emotion_rates = {}
     for emotion in ['happy', 'sad', 'angry', 'neutral', 'surprise', 'fear', 'disgust']:
-        count = emotion_counts.get(emotion, 0)
-        rate = (count / total_emotions * 100) if total_emotions > 0 else 0.0
+        count = emotion_visitor_counts.get(emotion, 0)
+        rate = (count / total_visitor * 100) if total_visitor > 0 else 0.0
         emotion_rates[f'{emotion}_rate'] = round(rate, 2)
     
-    logger.info(f"📊 Statistics: {total_visitor} visitors, {total_emotions} emotion detections")
+    # Validation
+    total_percentage = sum(emotion_rates.values())
+    logger.info(f"📊 Statistics: {total_visitor} visitors")
+    logger.info(f"📊 Emotion distribution: {dict(emotion_visitor_counts)}")
+    logger.info(f"📊 Emotion rates: {emotion_rates}")
+    logger.info(f"📊 Total percentage: {total_percentage}% (should be ~100%)")
+    
+    if abs(total_percentage - 100.0) > 0.5 and total_visitor > 0:
+        logger.warning(f"⚠️ VALIDATION WARNING: Total emotion percentage is {total_percentage}%, not 100%!")
     
     return {
         'total_visitor': total_visitor,
@@ -1138,23 +1264,48 @@ async def poll_and_save_video(job_id: str, ai_job_id: str, filename: str, zone_i
                     # Tạo statistic record
                     emotion_ratios = result['emotion_ratios']
                     
+                    # 🔍 DEBUG: Log emotion_ratios structure
+                    logger.info(f"🔍 DEBUG - emotion_ratios type: {type(emotion_ratios)}")
+                    logger.info(f"🔍 DEBUG - emotion_ratios content: {emotion_ratios}")
+                    logger.info(f"🔍 DEBUG - angry value: {emotion_ratios.get('angry')}")
+                    logger.info(f"🔍 DEBUG - happy value: {emotion_ratios.get('happy')}")
+                    
+                    # Helper function để lấy ratio an toàn
+                    def get_emotion_ratio(emotion_name):
+                        """Lấy ratio từ emotion_ratios, hỗ trợ cả format dict và số"""
+                        value = emotion_ratios.get(emotion_name, 0)
+                        logger.info(f"🔍 get_emotion_ratio('{emotion_name}'): value={value}, type={type(value)}")
+                        if isinstance(value, dict):
+                            ratio = value.get('ratio', 0)
+                            logger.info(f"   → extracted ratio: {ratio}")
+                            return ratio
+                        result_val = value if isinstance(value, (int, float)) else 0
+                        logger.info(f"   → direct value: {result_val}")
+                        return result_val
+                    
                     stat_query = """
                         INSERT INTO statistic 
                         (video_id, total_visitor, angry_rate, disgust_rate, fear_rate, 
                          happy_rate, neutral_rate, sad_rate, surprise_rate)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """
-                    cursor.execute(stat_query, (
+                    
+                    stat_values = (
                         video_id,
                         result['total_visitor'],
-                        emotion_ratios.get('0', {}).get('ratio', 0),  # angry
-                        emotion_ratios.get('1', {}).get('ratio', 0),  # disgust
-                        emotion_ratios.get('2', {}).get('ratio', 0),  # fear
-                        emotion_ratios.get('3', {}).get('ratio', 0),  # happy
-                        emotion_ratios.get('4', {}).get('ratio', 0),  # neutral
-                        emotion_ratios.get('5', {}).get('ratio', 0),  # sad
-                        emotion_ratios.get('6', {}).get('ratio', 0)   # surprise
-                    ))
+                        get_emotion_ratio('angry'),
+                        get_emotion_ratio('disgust'),
+                        get_emotion_ratio('fear'),
+                        get_emotion_ratio('happy'),
+                        get_emotion_ratio('neutral'),
+                        get_emotion_ratio('sad'),
+                        get_emotion_ratio('surprise')
+                    )
+                    
+                    logger.info(f"📊 Saving statistics: total_visitor={result['total_visitor']}")
+                    logger.info(f"📊 Emotion rates: angry={stat_values[2]}%, disgust={stat_values[3]}%, fear={stat_values[4]}%, happy={stat_values[5]}%, neutral={stat_values[6]}%, sad={stat_values[7]}%, surprise={stat_values[8]}%")
+                    
+                    cursor.execute(stat_query, stat_values)
                     connection.commit()
                     
                     logger.info(f"✅ Statistic record created for video {video_id}")
